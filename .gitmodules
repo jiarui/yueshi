@@ -1,0 +1,3 @@
+[submodule "include/peglib"]
+	path = include/peglib
+	url = git@github.com:jiarui/peglib.git
