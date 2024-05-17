@@ -1,0 +1,4 @@
+namespace ys {
+    class Heap {
+    };
+}
