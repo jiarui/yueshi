@@ -1,4 +1,5 @@
 #include "ysState.h"
+#include "peglib.h"
 
 
 int main(int argc, char *argv[]) {
