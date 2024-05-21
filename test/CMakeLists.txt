@@ -1,0 +1,5 @@
+find_package(Boost REQUIRED COMPONENTS unit_test_framework)
+add_executable(yueshi_test)
+target_sources(yueshi_test PRIVATE test.cpp)
+target_link_libraries(yueshi_test PUBLIC Boost::unit_test_framework)
+add_test(NAME yueshi_test COMMAND yueshi_test)

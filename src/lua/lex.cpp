@@ -1,9 +1,9 @@
 #include "lua/lex.h"
 using namespace peg;
-auto WS = *terminal(std::set({' ', '\f', '\t', '\v'}));
-auto linebreaks = terminal('\n');
-auto identifiers = terminal<char>([](char c){return std::isalpha(c);});
-
-next(Context)
-//while context.ended()
+// auto WS = *terminal(std::set({' ', '\f', '\t', '\v'}));
+// auto linebreak = terminal('\n');
+// auto identifiers = terminal<char>([](char c){return std::isalpha(c);});
+// auto shortcomment = terminal('-') >> anything >> linebreak;
+// auto longstring = terminal('[') >> .... 
+// auto 
 
