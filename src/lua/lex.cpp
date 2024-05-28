@@ -1,5 +1,7 @@
 #include "lua/lex.h"
 #include <type_traits>
+#include <string>
+#include <charconv>
 using namespace peg;
 using namespace ys::lua;
 
@@ -32,7 +34,7 @@ namespace lexconv
     auto decimal = -pos_or_neg >> +digit;
     auto hexdecimal = terminal('0') >> (terminal('x') | 'X') >> +xdigit >> -('.' >> +xdigit) >> -((terminal('p') | 'P') >> +decimal);
     auto expotent = -pos_or_neg >> +digit;
-    Rule<std::string::value_type> numeral = hexdecimal | ((fractional | decimal) >> (terminal('e') | 'E') >> -(decimal));
+    Rule<std::string::value_type> numeral = hexdecimal | ((fractional | decimal) >> -(terminal('e') | 'E') >> -(decimal));
 
     auto common_escape_code = terminal('a') | 'b' | 'f' | 'n' | 'r' | 't' | 'v' | (terminal('\\') >>'\\'>>'n')| ('z' >> WS) | (3 * digit) | (2 * xdigit) | (terminal('u') >> '{' >> *xdigit >> '}') ;
     Rule<std::string::value_type> single_escape_code = terminal('\\') >> ( common_escape_code | '\'' );
@@ -42,10 +44,11 @@ namespace lexconv
     auto string_single_quote = '\'' >> *(single_escape_code | single_no_escape_code) >> '\'';
     auto string_double_quote = '"' >> *(double_escape_code | double_no_escape_code) >> '"';
     Rule<std::string::value_type> long_bracket_start = '[' >> *terminal('=') >> '[';
+    Rule<std::string::value_type> comment_long_bracket_start = '[' >> *terminal('=') >> '[';
     Rule<std::string::value_type> string_literal = string_single_quote | string_double_quote | long_bracket_start;
     
-    Rule<std::string::value_type> comment = terminal('-') >> '-' >> (long_bracket_start | (*not_linebreak >> linebreak));
-    Rule<std::string::value_type> token = numeral | name | ops | string_literal | comment | WS | linebreak;
+    Rule<std::string::value_type> comment = terminal('-') >> '-' >> (comment_long_bracket_start | (*not_linebreak >> linebreak));
+    Rule<std::string::value_type> token = comment | WS | numeral | name | string_literal | ops | linebreak;
 
 } // namespace lexconv
 #define STR_ELEMENT(p) #p
@@ -130,15 +133,33 @@ std::ostream& operator<<(std::ostream& s, const Token& t) {
 }
 
 Tokenizer::Tokenizer(const std::string& input) : m_context(input) {
-    lexconv::long_bracket_start.setAction([](Context<char>& c, Context<char>::MatchRange m) {
+    lexconv::comment_long_bracket_start.setAction([this](Context<char>& c, Context<char>::MatchRange m) {
         int level = m.end() - m.begin() - 2;
-        assert(level>0);
-        Rule<char> long_bracket_end = ']' >> (level * terminal('=')) >> ']';
+        assert(level>=0);
+        auto end_mark = ']' >> (level * terminal('=')) >> ']';
+        Rule<char> long_bracket_end = end_mark;
         Rule<char> not_closing = *terminal<char>([](char c){return c!=']';});
         auto grammar = not_closing >> long_bracket_end;
+        auto startpos = c.mark();
         while(!c.ended()) {
             grammar.parse(c);
         }
+    });
+
+    lexconv::long_bracket_start.setAction([this](Context<char>& c, Context<char>::MatchRange m) {
+        int level = m.end() - m.begin() - 2;
+        assert(level>=0);
+        auto end_mark = ']' >> (level * terminal('=')) >> ']';
+        Rule<char> long_bracket_end = end_mark;
+        Rule<char> not_closing = *terminal<char>([](char c){return c!=']';});
+        auto grammar = not_closing >> long_bracket_end;
+        auto startpos = c.mark();
+        while(!c.ended()) {
+            grammar.parse(c);
+        }
+        auto endpos = c.mark() - 2 - level;
+        m_token_buf.id = static_cast<Token::TokenIDType>(TokenID::TK_STRING);
+        m_token_buf.info = std::string(startpos, endpos);
     });
     lexconv::ops.setAction([this](Context<char>& c, Context<char>::MatchRange m){
         std::string_view result {m.begin(), m.end()};
@@ -171,8 +192,26 @@ Tokenizer::Tokenizer(const std::string& input) : m_context(input) {
 
     lexconv::string_literal.setAction([this](Context<char>& c, Context<char>::MatchRange m) {
         std::string_view result {m.begin()+1, m.end()-1};
-        m_token_buf.id = static_cast<Token::TokenIDType>(TokenID::TK_STRING);
-        m_token_buf.info = std::string(result);
+        if(m_token_buf.id == -1){
+            m_token_buf.id = static_cast<Token::TokenIDType>(TokenID::TK_STRING);
+            m_token_buf.info = std::string(result);
+        }
+    });
+
+    lexconv::numeral.setAction([this](Context<char>& c, Context<char>::MatchRange m) {
+        std::string_view result{m.begin(), m.end()};
+        int value;
+        auto ret = std::from_chars(result.data(), result.data()+result.size(), value);
+        if(ret.ptr == result.data()+result.size()){
+            m_token_buf.id = static_cast<Token::TokenIDType>(TokenID::TK_INT);
+            m_token_buf.info = value;
+        }
+        else {
+            double value;
+            auto ret = std::from_chars(result.data(), result.data()+result.size(), value);
+            m_token_buf.id = static_cast<Token::TokenIDType>(TokenID::TK_FLT);
+            m_token_buf.info = value;
+        }
     });
 }
 
