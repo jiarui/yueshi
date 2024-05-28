@@ -2,6 +2,7 @@
 #include <span>
 #include <variant>
 #include <string_view>
+#include <iostream>
 namespace ys
 {
     namespace lua
@@ -20,19 +21,21 @@ namespace ys
         };
 
         struct Token{
-            using TokenInfo = std::variant<long long, double, std::string_view>;
+            using TokenInfo = std::variant<long long, double, std::string>;
             Token() = default;
             TokenID id;
             TokenInfo info;
+            friend std::ostream& operator<<(std::ostream&, const Token&);
         };
         
 
         struct Tokenizer {
         public:
-            Tokenizer(const std::string& input) : m_context(input) {}
+            Tokenizer(const std::string& input);
             Token next();
         protected:
             peg::Context<char> m_context;
+            Token m_token_buf;
         };
         
     } // namespace lua
