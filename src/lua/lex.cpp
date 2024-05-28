@@ -7,6 +7,18 @@ using namespace peg;
 
 namespace lexconv
 {
+    Rule<std::string::value_type> ops = 
+        terminalSeq("...") |
+        terminalSeq("..") |
+        terminalSeq("<<") |
+        terminalSeq(">>") |
+        terminalSeq("//") |
+        terminalSeq("==") |
+        terminalSeq("~=") |
+        terminalSeq("<=") |
+        terminalSeq(">=") |
+        terminalSeq("::") |
+        '+' | '-' | '*' | '/' | '%' | '^' | '#' | '&' | '~' | '|' | '<' | '>' | '=' | '(' | ')' | '{' | '}' | '[' | ']' | ';' | ':'| ',' | '.';
     auto WS = +terminal(std::set({' ', '\f', '\t', '\v'}));
     auto not_linebreak = terminal<char>([](char c){return c!='\n';});
     auto name_start = terminal<char>([](char c){return std::isalpha(c) || c == '_';});
@@ -33,14 +45,12 @@ namespace lexconv
     Rule<std::string::value_type> string_literal = string_single_quote | string_double_quote | long_bracket_start;
     
     Rule<std::string::value_type> comment = terminal('-') >> '-' >> (long_bracket_start | (*not_linebreak >> linebreak));
-    Rule<std::string::value_type> token = numeral | name | string_literal | comment | WS;
+    Rule<std::string::value_type> token = numeral | name | ops | string_literal | comment | WS | linebreak;
 
-    
-    
 } // namespace lexconv
-#define STR_ELEMENT(p) {p, #p}
+#define STR_ELEMENT(p) #p
 
-const static std::vector<std::tuple<TokenID, std::string_view>> tk_type_str = {
+const static std::vector<const char *> tk_type_str = {
     STR_ELEMENT(TokenID::TK_AND),
     STR_ELEMENT(TokenID::TK_BREAK),
     STR_ELEMENT(TokenID::TK_ELSE),
@@ -76,10 +86,46 @@ const static std::vector<std::tuple<TokenID, std::string_view>> tk_type_str = {
     STR_ELEMENT(TokenID::TK_STRING)
 };
 
+#undef STR_ELEMENT
+
+const std::map<std::string_view, TokenID> str2tkid = {
+    {"and", TokenID::TK_AND},
+    {"break", TokenID::TK_BREAK},
+    {"else", TokenID::TK_ELSE},
+    {"elseif", TokenID::TK_ELSEIF},
+    {"end", TokenID::TK_END},
+    {"false", TokenID::TK_FALSE},
+    {"for", TokenID::TK_FOR},
+    {"function", TokenID::TK_FUNCTION},
+    {"goto", TokenID::TK_GOTO},
+    {"if", TokenID::TK_IF},
+    {"in", TokenID::TK_IN},
+    {"local", TokenID::TK_LOCAL},
+    {"nil", TokenID::TK_NIL},
+    {"not", TokenID::TK_NOT},
+    {"or", TokenID::TK_OR},
+    {"repeat", TokenID::TK_REPEAT},
+    {"return", TokenID::TK_RETURN},
+    {"then", TokenID::TK_THEN},
+    {"true", TokenID::TK_TRUE},
+    {"until", TokenID::TK_UNTIL},
+    {"while", TokenID::TK_WHILE},
+    {"//", TokenID::TK_IDIV},
+    {"..", TokenID::TK_CONCAT},
+    {"...", TokenID::TK_DOTS},
+    {"==", TokenID::TK_EQ},
+    {">=", TokenID::TK_GE},
+    {"<=", TokenID::TK_LE},
+    {"~=", TokenID::TK_NE},
+    {"<<", TokenID::TK_SHL},
+    {">>", TokenID::TK_SHR},
+    {"::", TokenID::TK_DBCOLON},
+};
+
 std::ostream& operator<<(std::ostream& s, const Token& t) {
     auto id = static_cast<typename std::underlying_type<TokenID>::type>(t.id);
     auto index = id - UCHAR_MAX;
-    s<<"Token Type"<< id << ':' << std::get<1>(tk_type_str[index])<<std::endl;
+    s<<"Token Type"<< id << ':' << tk_type_str[index]<<std::endl;
     return s;
 }
 
@@ -94,18 +140,56 @@ Tokenizer::Tokenizer(const std::string& input) : m_context(input) {
             grammar.parse(c);
         }
     });
+    lexconv::ops.setAction([this](Context<char>& c, Context<char>::MatchRange m){
+        std::string_view result {m.begin(), m.end()};
+        assert(result.size() > 0 && result.size() <= 3);
+        if(result.size() > 1) {
+            auto iter = str2tkid.find(result);
+            if(iter != str2tkid.end()) {
+                m_token_buf.id = static_cast<Token::TokenIDType>(iter->second);
+            }
+            else {
+                assert(false);
+            }
+        }
+        else {
+            m_token_buf.id = int(result[0]);
+        }
+    });
+
+    lexconv::name.setAction([this](Context<char>& c, Context<char>::MatchRange m){
+        std::string_view result {m.begin(), m.end()};
+        auto iter = str2tkid.find(result);
+        if(iter == str2tkid.end()) {
+            m_token_buf.id = static_cast<Token::TokenIDType>(TokenID::TK_NAME);
+            m_token_buf.info = std::string(result);
+        }
+        else {
+            m_token_buf.id = static_cast<Token::TokenIDType>(iter->second);
+        }
+    });
+
+    lexconv::string_literal.setAction([this](Context<char>& c, Context<char>::MatchRange m) {
+        std::string_view result {m.begin()+1, m.end()-1};
+        m_token_buf.id = static_cast<Token::TokenIDType>(TokenID::TK_STRING);
+        m_token_buf.info = std::string(result);
+    });
 }
 
-Token Tokenizer::next() {
-    if(!m_context.ended()){
+std::optional<Token> Tokenizer::next() {
+    while(!m_context.ended()) {
         bool ok = lexconv::token(m_context);
         if(ok) {
-            return m_token_buf;
+            if(hasToken()){
+                return currentToken();
+            }
+        }
+        else{
+            m_token_buf.id = -1;
+            return currentToken();
         }
     }
-    return {};
+    m_token_buf.id = static_cast<Token::TokenIDType>(TokenID::TK_EOS);
+    return currentToken();
 }
-
-
-
 

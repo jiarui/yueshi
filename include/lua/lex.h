@@ -22,8 +22,9 @@ namespace ys
 
         struct Token{
             using TokenInfo = std::variant<long long, double, std::string>;
+            using TokenIDType = std::underlying_type_t<TokenID>;
             Token() = default;
-            TokenID id;
+            TokenIDType id{-1};
             TokenInfo info;
             friend std::ostream& operator<<(std::ostream&, const Token&);
         };
@@ -32,7 +33,18 @@ namespace ys
         struct Tokenizer {
         public:
             Tokenizer(const std::string& input);
-            Token next();
+            std::optional<Token> next();
+            void clear() {
+                m_token_buf.id = -1;
+            }
+            bool hasToken() {
+                return m_token_buf.id != -1;
+            }
+            Token currentToken() {
+                Token result;
+                std::swap(result, m_token_buf);
+                return result;
+            }
         protected:
             peg::Context<char> m_context;
             Token m_token_buf;
