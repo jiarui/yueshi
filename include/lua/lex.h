@@ -1,3 +1,4 @@
+#pragma once
 #include "peglib.h"
 #include <span>
 #include <variant>
@@ -46,7 +47,7 @@ namespace ys
                 return result;
             }
         protected:
-            peg::Context<char> m_context;
+            peg::Context<std::span<const std::string::value_type>> m_context;
             Token m_token_buf;
         };
         

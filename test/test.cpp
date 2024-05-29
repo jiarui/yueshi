@@ -85,6 +85,16 @@ asdf]==])"};
             BOOST_CHECK_EQUAL(tk.value().id , static_cast<Token::TokenIDType>(TokenID::TK_STRING));
             BOOST_CHECK_EQUAL(std::get<2>(tk.value().info).size(), 8);
     }
+    {
+        //UTF-8 encoding
+        std::string input{R"("été")"};
+        Tokenizer t{input};
+        auto tk = t.next();
+        BOOST_CHECK(tk);
+        BOOST_CHECK_EQUAL(tk.value().id , static_cast<Token::TokenIDType>(TokenID::TK_STRING));
+        BOOST_CHECK_EQUAL(std::get<2>(tk.value().info).size(), 5);
+
+    }
 }
 
 BOOST_AUTO_TEST_CASE(test_comment) {

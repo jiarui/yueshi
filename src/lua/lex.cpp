@@ -9,7 +9,7 @@ using namespace peg;
 
 namespace lexconv
 {
-    Rule<std::string::value_type> ops = 
+    Rule<> ops = 
         terminalSeq("...") |
         terminalSeq("..") |
         terminalSeq("<<") |
@@ -25,7 +25,7 @@ namespace lexconv
     auto not_linebreak = terminal<char>([](char c){return c!='\n';});
     auto name_start = terminal<char>([](char c){return std::isalpha(c) || c == '_';});
     auto name_cont = terminal<char>([](char c){return std::isalnum(c) || c=='_';});
-    Rule<std::string::value_type> name =  name_start >> *name_cont;
+    Rule<> name =  name_start >> *name_cont;
     auto linebreak = terminalSeq<char>("\r\n") | terminal('\n');
     auto digit = terminal('0', '9');
     auto xdigit = terminal<char>([](char c){return std::isxdigit(c);});
@@ -34,21 +34,21 @@ namespace lexconv
     auto decimal = -pos_or_neg >> +digit;
     auto hexdecimal = terminal('0') >> (terminal('x') | 'X') >> +xdigit >> -('.' >> +xdigit) >> -((terminal('p') | 'P') >> +decimal);
     auto expotent = -pos_or_neg >> +digit;
-    Rule<std::string::value_type> numeral = hexdecimal | ((fractional | decimal) >> -(terminal('e') | 'E') >> -(decimal));
+    Rule<> numeral = hexdecimal | ((fractional | decimal) >> -(terminal('e') | 'E') >> -(decimal));
 
     auto common_escape_code = terminal('a') | 'b' | 'f' | 'n' | 'r' | 't' | 'v' | (terminal('\\') >>'\\'>>'n')| ('z' >> WS) | (3 * digit) | (2 * xdigit) | (terminal('u') >> '{' >> *xdigit >> '}') ;
-    Rule<std::string::value_type> single_escape_code = terminal('\\') >> ( common_escape_code | '\'' );
-    Rule<std::string::value_type> double_escape_code = terminal('\\') >> ( common_escape_code | '\'' );
+    Rule<> single_escape_code = terminal('\\') >> ( common_escape_code | '\'' );
+    Rule<> double_escape_code = terminal('\\') >> ( common_escape_code | '\'' );
     auto single_no_escape_code = terminal<char>([](char c){return c != '\'';});
     auto double_no_escape_code = terminal<char>([](char c){return c != '"';});
     auto string_single_quote = '\'' >> *(single_escape_code | single_no_escape_code) >> '\'';
     auto string_double_quote = '"' >> *(double_escape_code | double_no_escape_code) >> '"';
-    Rule<std::string::value_type> long_bracket_start = '[' >> *terminal('=') >> '[';
-    Rule<std::string::value_type> comment_long_bracket_start = '[' >> *terminal('=') >> '[';
-    Rule<std::string::value_type> string_literal = string_single_quote | string_double_quote | long_bracket_start;
+    Rule<> long_bracket_start = '[' >> *terminal('=') >> '[';
+    Rule<> comment_long_bracket_start = '[' >> *terminal('=') >> '[';
+    Rule<> string_literal = string_single_quote | string_double_quote | long_bracket_start;
     
-    Rule<std::string::value_type> comment = terminal('-') >> '-' >> (comment_long_bracket_start | (*not_linebreak >> linebreak));
-    Rule<std::string::value_type> token = comment | WS | numeral | name | string_literal | ops | linebreak;
+    Rule<> comment = terminal('-') >> '-' >> (comment_long_bracket_start | (*not_linebreak >> linebreak));
+    Rule<> token = comment | WS | numeral | name | string_literal | ops | linebreak;
 
 } // namespace lexconv
 #define STR_ELEMENT(p) #p
@@ -133,12 +133,12 @@ std::ostream& operator<<(std::ostream& s, const Token& t) {
 }
 
 Tokenizer::Tokenizer(const std::string& input) : m_context(input) {
-    lexconv::comment_long_bracket_start.setAction([this](Context<char>& c, Context<char>::MatchRange m) {
+    lexconv::comment_long_bracket_start.setAction([this](decltype(m_context)& c, decltype(m_context)::MatchRange m) {
         int level = m.end() - m.begin() - 2;
         assert(level>=0);
         auto end_mark = ']' >> (level * terminal('=')) >> ']';
-        Rule<char> long_bracket_end = end_mark;
-        Rule<char> not_closing = *terminal<char>([](char c){return c!=']';});
+        Rule<> long_bracket_end = end_mark;
+        Rule<> not_closing = *terminal<char>([](char c){return c!=']';});
         auto grammar = not_closing >> long_bracket_end;
         auto startpos = c.mark();
         while(!c.ended()) {
@@ -146,12 +146,12 @@ Tokenizer::Tokenizer(const std::string& input) : m_context(input) {
         }
     });
 
-    lexconv::long_bracket_start.setAction([this](Context<char>& c, Context<char>::MatchRange m) {
+    lexconv::long_bracket_start.setAction([this](decltype(m_context)& c, decltype(m_context)::MatchRange m) {
         int level = m.end() - m.begin() - 2;
         assert(level>=0);
         auto end_mark = ']' >> (level * terminal('=')) >> ']';
-        Rule<char> long_bracket_end = end_mark;
-        Rule<char> not_closing = *terminal<char>([](char c){return c!=']';});
+        Rule<> long_bracket_end = end_mark;
+        Rule<> not_closing = *terminal<char>([](char c){return c!=']';});
         auto grammar = not_closing >> long_bracket_end;
         auto startpos = c.mark();
         while(!c.ended()) {
@@ -161,7 +161,7 @@ Tokenizer::Tokenizer(const std::string& input) : m_context(input) {
         m_token_buf.id = static_cast<Token::TokenIDType>(TokenID::TK_STRING);
         m_token_buf.info = std::string(startpos, endpos);
     });
-    lexconv::ops.setAction([this](Context<char>& c, Context<char>::MatchRange m){
+    lexconv::ops.setAction([this](decltype(m_context)& c, decltype(m_context)::MatchRange m){
         std::string_view result {m.begin(), m.end()};
         assert(result.size() > 0 && result.size() <= 3);
         if(result.size() > 1) {
@@ -178,7 +178,7 @@ Tokenizer::Tokenizer(const std::string& input) : m_context(input) {
         }
     });
 
-    lexconv::name.setAction([this](Context<char>& c, Context<char>::MatchRange m){
+    lexconv::name.setAction([this](decltype(m_context)& c, decltype(m_context)::MatchRange m){
         std::string_view result {m.begin(), m.end()};
         auto iter = str2tkid.find(result);
         if(iter == str2tkid.end()) {
@@ -190,7 +190,7 @@ Tokenizer::Tokenizer(const std::string& input) : m_context(input) {
         }
     });
 
-    lexconv::string_literal.setAction([this](Context<char>& c, Context<char>::MatchRange m) {
+    lexconv::string_literal.setAction([this](decltype(m_context)& c, decltype(m_context)::MatchRange m) {
         std::string_view result {m.begin()+1, m.end()-1};
         if(m_token_buf.id == -1){
             m_token_buf.id = static_cast<Token::TokenIDType>(TokenID::TK_STRING);
@@ -198,7 +198,7 @@ Tokenizer::Tokenizer(const std::string& input) : m_context(input) {
         }
     });
 
-    lexconv::numeral.setAction([this](Context<char>& c, Context<char>::MatchRange m) {
+    lexconv::numeral.setAction([this](decltype(m_context)& c, decltype(m_context)::MatchRange m) {
         std::string_view result{m.begin(), m.end()};
         int value;
         auto ret = std::from_chars(result.data(), result.data()+result.size(), value);
