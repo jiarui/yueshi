@@ -2,8 +2,6 @@
 #include "peglib.h"
 #include <span>
 #include <variant>
-#include <string_view>
-#include <iostream>
 namespace ys
 {
     namespace lua
@@ -28,9 +26,11 @@ namespace ys
             TokenIDType id{-1};
             TokenInfo info;
             friend std::ostream& operator<<(std::ostream&, const Token&);
+            bool operator==(const Token& rhs);
         };
         
 
+        template <typename InputSource=std::span<const typename std::string::value_type>>
         struct Tokenizer {
         public:
             Tokenizer(const std::string& input);
@@ -46,8 +46,10 @@ namespace ys
                 std::swap(result, m_token_buf);
                 return result;
             }
+            using Context = peg::Context<InputSource>;
+            using value_type = typename peg::Context<InputSource>::ValueType;
         protected:
-            peg::Context<std::span<const std::string::value_type>> m_context;
+            peg::Context<InputSource> m_context;
             Token m_token_buf;
         };
         

@@ -107,3 +107,14 @@ asdf]])"};
         BOOST_CHECK_EQUAL(tk.value().id , static_cast<Token::TokenIDType>(TokenID::TK_EOS));
     }
 }
+
+BOOST_AUTO_TEST_CASE(test_files) {
+    Tokenizer t{"print"};
+    auto tk = t.next();
+    BOOST_CHECK(tk);
+    BOOST_CHECK_EQUAL(tk.value().id , static_cast<Token::TokenIDType>(TokenID::TK_NAME));
+    BOOST_CHECK_EQUAL(std::get<2>(tk.value().info) , "print");
+    tk = t.next();
+    BOOST_CHECK(tk);
+    BOOST_CHECK_EQUAL(tk.value().id , static_cast<Token::TokenIDType>(TokenID::TK_EOS));
+}
