@@ -8,12 +8,13 @@ on:
 
 # Matrix pinned to the local development toolchain so a CI run can be
 # reproduced exactly on a developer machine before pushing:
-#   - GCC 15      (local: gcc 15.2.1, openSUSE Tumbleweed)
-#   - Clang 20    (local: clang 22.1.5; clang-20 is the closest stable
-#                  release available on ubuntu-24.04 runners via apt.llvm.org,
-#                  and matches the LLVM pin peglib's own CI uses)
-# GitHub has no openSUSE / clang-22 runner, so ubuntu-24.04 stands in for the
-# OS while keeping the compiler majors identical.
+#   - GCC 15        (local: gcc 15.2.1, openSUSE Tumbleweed)
+#   - Clang 22      (local: clang 22.1.5)
+#   - MSVC v145     (VS 2026 / Build Tools 14.51, the latest MSVC on GHA)
+# plus a GCC 15 ASan+UBSan Debug job as the correctness gate.
+#
+# GitHub has no openSUSE runner, so ubuntu-24.04 stands in for the OS while
+# keeping the compiler majors identical to the local toolchain.
 jobs:
   build-test:
     name: ${{ matrix.config.name }}
@@ -29,12 +30,33 @@ jobs:
             # gcc-15 is not in the base noble repo; the ubuntu-toolchain-r/test
             # PPA backports newer GCC releases to ubuntu-24.04.
             setup: gnu
-          - name: "Clang 20 (ubuntu-24.04)"
+            build_type: Release
+            sanitizers: OFF
+          - name: "Clang 22 (ubuntu-24.04)"
             os: ubuntu-24.04
-            cc: clang-20
-            cxx: clang++-20
-            # clang-20 comes from the official LLVM apt repo for noble.
+            cc: clang-22
+            cxx: clang++-22
+            # clang-22 is installed via the official llvm.sh helper (it adds
+            # the apt.llvm.org source + keyring and falls back across LLVM
+            # minor versions). The hand-written llvm-toolchain-noble-22 apt
+            # source has had intermittent 404 / missing-package issues.
             setup: llvm
+            build_type: Release
+            sanitizers: OFF
+          - name: "GCC 15 ASan+UBSan (ubuntu-24.04)"
+            os: ubuntu-24.04
+            cc: gcc-15
+            cxx: g++-15
+            setup: gnu
+            build_type: Debug
+            sanitizers: ON
+          - name: "MSVC v145 (windows-2025)"
+            os: windows-2025
+            # windows-2025 ships Visual Studio 2026 / MSVC v145 (Build Tools
+            # 14.51) out of the box; no toolchain install step is needed.
+            setup: msvc
+            build_type: Release
+            sanitizers: OFF
 
     steps:
       - uses: actions/checkout@v4
@@ -52,24 +74,35 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gcc-15 g++-15
 
-      - name: Install Clang 20
+      - name: Install Clang 22
         if: matrix.config.setup == 'llvm'
         run: |
-          wget -qO- https://apt.llvm.org/llvm-snapshot.gpt.key | \
-            sudo gpg --dearmor -o /etc/apt/keyrings/llvm.gpg
-          echo "deb [signed-by=/etc/apt/keyrings/llvm.gpg] http://apt.llvm.org/noble/ llvm-toolchain-noble-20 main" | \
-            sudo tee /etc/apt/sources.list.d/llvm.list
+          # llvm.sh adds the apt.llvm.org source + keyring for the requested
+          # major and installs clang-22. It is the LLVM-recommended way to
+          # pin a specific major on Ubuntu and tolerates minor-version churn.
           sudo apt-get update
-          sudo apt-get install -y clang-20
+          sudo apt-get install -y wget gnupg lsb-release software-properties-common
+          wget -qO llvm.sh https://apt.llvm.org/llvm.sh
+          sudo chmod +x llvm.sh
+          sudo ./llvm.sh 22
 
       - name: Configure
         env:
           CC: ${{ matrix.config.cc }}
           CXX: ${{ matrix.config.cxx }}
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+        run: >
+          cmake -B build
+          -DCMAKE_BUILD_TYPE=${{ matrix.config.build_type }}
+          -DYUESHI_ENABLE_SANITIZERS=${{ matrix.config.sanitizers }}
+          ${{ runner.os == 'Windows' && '-G Ninja' || '' }}
 
       - name: Build
-        run: cmake --build build --config Release -j
+        run: cmake --build build --config ${{ matrix.config.build_type }} -j
 
       - name: Test
-        run: ctest --test-dir build --build-config Release --output-on-failure
+        env:
+          # Surface sanitizer diagnostics inline; abort on the first error so
+          # CI fails fast rather than masking later issues.
+          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: ctest --test-dir build --build-config ${{ matrix.config.build_type }} --output-on-failure

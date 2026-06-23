@@ -11,6 +11,7 @@
 #include <string>
 #include <string_view>
 #include <variant>
+#include <vector>
 
 #include "peglib.h"
 #include "lua/lex_conv.h"
@@ -37,9 +38,21 @@ namespace ys
             Token() = default;
             TokenIDType id{-1};
             TokenInfo info;
+            // Source range as byte offsets into the original input. start is
+            // inclusive, end is exclusive (length == end - start). Used for
+            // diagnostics and (later) parser source spans.
+            std::size_t start{0};
+            std::size_t end{0};
             friend std::ostream& operator<<(std::ostream&, const Token&);
-            bool operator==(const Token& rhs);
+            // const so Token satisfies std::equality_comparable (peglib's
+            // PegValue concept), enabling token-level parsing via
+            // terminal(Token) / terminalSeq(vector<Token>).
+            bool operator==(const Token& rhs) const;
         };
+
+        // Declared in the namespace (not just as a friend inside Token) so the
+        // qualified definition in lex.cpp resolves cleanly.
+        std::ostream& operator<<(std::ostream& s, const Token& t);
 
         extern const std::map<std::string_view, TokenID> str2tkid;
 
@@ -50,22 +63,36 @@ namespace ys
             // read matched text via node offsets + Context::substr.
             using Context = peg::Context<char>;
 
-            Tokenizer(const std::string& input);
-            std::optional<Token> next();
-            void clear() {
-                m_token_buf.id = -1;
-            }
-            bool hasToken() const {
-                return m_token_buf.id != -1;
-            }
-            Token currentToken() {
-                Token result;
-                std::swap(result, m_token_buf);
-                return result;
-            }
+            explicit Tokenizer(std::string input);
+
+            // Eagerly tokenize the entire input. Returns the full token stream
+            // with a trailing TK_EOS sentinel. On a lexing error the last
+            // element before EOS is a sentinel Token with id == -1 and the
+            // caller can retrieve a diagnostic via take_error().
+            //
+            // This is the primary interface for the parser: peglib's token-
+            // level Context<Token> needs a contiguous token sequence, which a
+            // pull-style next() cannot provide. The pull-style API was removed
+            // in favour of this single eager entry point.
+            std::vector<Token> tokenize();
+
+            // Pop the furthest lexing failure (if any) formatted as
+            // "file:line:col: error: expected ...". Returns std::nullopt when
+            // the last tokenize() run had no error. The Tokenizer keeps the
+            // input alive so a peg::SourceMap can be built on demand.
+            std::optional<std::string> take_error();
         protected:
             peg::Grammar<> m_grammar;
+            // m_input MUST be declared before m_context: members are initialized
+            // in declaration order, and Context holds a non-owning SpanSource
+            // pointing into this string. If m_context were initialized first it
+            // would capture the constructor's by-value parameter, which is
+            // destroyed at the end of the constructor — a dangling pointer.
+            std::string m_input;
             Context m_context;
+            // Per-token scratch written by the semantic actions during a
+            // single grammar.parse("token") call; tokenize() swaps it out
+            // after each successful scan. Reset to id == -1 before each parse.
             Token m_token_buf;
 
             // Scan the remaining input for `marker`, advancing the context past

@@ -9,7 +9,8 @@ int ys::ysState::loadFile(const char *file_name)
     std::ifstream input_steam(file_name);
     std::string str((std::istreambuf_iterator<char>(input_steam)), std::istreambuf_iterator<char>());
     ys::lua::Tokenizer t(str);
-    t.next();
+    auto tokens = t.tokenize();
+    (void)tokens; // parser not yet wired in; lexing side-effect only
     return 0;
 }
 

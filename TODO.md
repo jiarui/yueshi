@@ -10,19 +10,34 @@ yueshi is a Lua 5.4 interpreter built on
 - Basic lexer grammar (names, numerals, comments, strings, operators)
 - Tokenizer with semantic actions (keyword disambiguation, int/float parsing)
 - CMake build with doctest (bundled in peglib submodule)
+- Long-bracket strings (`[[ ... ]]`, `[==[ ... ]==]`) and comments
+- All operators including `//`, `<<`, `>>`, `~`, `...`, `::`
+- Hex integers / hex floats / decimal floats / exponents (`0xFF`, `0x1.8p3`, `1e-4`)
+- Numeric literal sign correctness (signs are unary operators, not part of the literal)
+- Escape sequence decoding (`\n`, `\u{XXXX}`, `\xAB`, `\ddd`, `\z`)
+- `do` keyword + `Token::operator==` is const (satisfies peglib `PegValue` for token-level parsing)
+- peglib-backed lexer diagnostics (`take_error()` → `file:line:col: error: expected X`)
+- Token source ranges (`start` / `end` byte offsets)
+- Eager `Tokenizer::tokenize()` returning `std::vector<Token>` (with trailing `TK_EOS`)
+- CI: GCC 15, Clang 22, MSVC v145, plus a GCC 15 ASan+UBSan Debug gate
 
 ## Phase 1 — Lexer (double-pass)
 
-- [ ] `Token { TokenID, TokenValue, SourceRange }` — add source range tracking
-- [ ] Complete Lua 5.4 lexing:
-      - [ ] Long-bracket strings (`[[ ... ]]`, `[==[ ... ]==]`)
-      - [ ] Long-bracket comments
-      - [ ] All operators including `//`, `<<`, `>>`, `~`, `...`, `::`
-      - [ ] Hex floats and exponents (`0xA23p-4`)
-      - [ ] Unicode escape sequences (`\u{XXXX}`)
-- [ ] `TokenStream` API (`peek(n)` / `next()` / `expect(TokenID)`)
-- [ ] Keyword vs name disambiguation via `cut`
-- [ ] Comprehensive lexer test suite (Lua 5.4 reference lexer corpus)
+- [x] `Token { TokenID, TokenValue, SourceRange }` — source range tracking
+- [x] Complete Lua 5.4 lexing:
+      - [x] Long-bracket strings (`[[ ... ]]`, `[==[ ... ]==]`)
+      - [x] Long-bracket comments
+      - [x] All operators including `//`, `<<`, `>>`, `~`, `...`, `::`
+      - [x] Hex floats and exponents (`0xA23p-4`)
+      - [x] Unicode escape sequences (`\u{XXXX}`)
+- [ ] `TokenStream` API (`peek(n)` / `next()` / `expect(TokenID)`) — deferred to
+      Phase 2; `tokenize()` + peglib `Context<Token>` cover the parser's needs
+- [x] Keyword vs name disambiguation via `cut`
+- [ ] Comprehensive lexer test suite (Lua 5.4 reference lexer corpus) —
+      correctness/regression cases are in `test/lex_correctness.cpp`; full
+      corpus integration is pending
+- [ ] Minor: bare `\r` line endings (H8.2); reject raw newlines inside short
+      strings (H8.3)
 
 ## Phase 2 — Parser → Typed AST
 

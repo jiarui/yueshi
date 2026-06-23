@@ -6,8 +6,11 @@ with packrat memoization, left-recursion support, and a cut operator.
 
 ## Status
 
-Early development. The lexer is partially implemented; the parser, AST, and
-evaluator are planned. See [TODO.md](TODO.md) for the full roadmap.
+Early development. The lexer is feature-complete (full Lua 5.4 lexical
+syntax: numerals incl. hex floats, escape decoding, long-bracket
+strings/comments, all operators and keywords) with peglib-backed error
+diagnostics; the parser, AST, and evaluator are planned. See
+[TODO.md](TODO.md) for the full roadmap.
 
 ## Architecture
 
@@ -40,8 +43,9 @@ src/
   yueshi.cpp       Main entry point
   yueshic.cpp      Compiler CLI
 test/
-  test.cpp         Unit tests (Boost.Test)
-  test.lua         Test Lua source
+  test.cpp              Unit tests (doctest)
+  lex_correctness.cpp   Lexer correctness / regression suite
+  test.lua              Test Lua source
 ```
 
 ## Build
@@ -54,11 +58,22 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
+To run the lexer under ASan + UBSan (the correctness gate used by CI):
+
+```sh
+cmake -B build -DCMAKE_BUILD_TYPE=Debug -DYUESHI_ENABLE_SANITIZERS=ON
+cmake --build build
+ctest --test-dir build --output-on-failure
+```
+
+CI covers GCC 15 (Release + ASan/UBSan Debug), Clang 22 (Release), and
+MSVC v145 (Release, windows-2025).
+
 ## Dependencies
 
 - **peglib** (submodule) — C++20 PEG library
 - **doctest** (bundled in peglib's `third_party/`) — unit testing
-- C++20 compiler (GCC 11+ / Clang 14+ / MSVC 19.30+)
+- C++20 compiler (GCC 15 / Clang 22 / MSVC v145)
 
 ## License
 
