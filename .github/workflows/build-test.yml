@@ -1,0 +1,75 @@
+name: build-test
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+# Matrix pinned to the local development toolchain so a CI run can be
+# reproduced exactly on a developer machine before pushing:
+#   - GCC 15      (local: gcc 15.2.1, openSUSE Tumbleweed)
+#   - Clang 20    (local: clang 22.1.5; clang-20 is the closest stable
+#                  release available on ubuntu-24.04 runners via apt.llvm.org,
+#                  and matches the LLVM pin peglib's own CI uses)
+# GitHub has no openSUSE / clang-22 runner, so ubuntu-24.04 stands in for the
+# OS while keeping the compiler majors identical.
+jobs:
+  build-test:
+    name: ${{ matrix.config.name }}
+    runs-on: ${{ matrix.config.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - name: "GCC 15 (ubuntu-24.04)"
+            os: ubuntu-24.04
+            cc: gcc-15
+            cxx: g++-15
+            # gcc-15 is not in the base noble repo; the ubuntu-toolchain-r/test
+            # PPA backports newer GCC releases to ubuntu-24.04.
+            setup: gnu
+          - name: "Clang 20 (ubuntu-24.04)"
+            os: ubuntu-24.04
+            cc: clang-20
+            cxx: clang++-20
+            # clang-20 comes from the official LLVM apt repo for noble.
+            setup: llvm
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # include/peglib is a git submodule — fetch it so the build can
+          # resolve add_subdirectory(include/peglib).
+          submodules: true
+
+      - name: Install GCC 15
+        if: matrix.config.setup == 'gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y software-properties-common
+          sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
+          sudo apt-get update
+          sudo apt-get install -y gcc-15 g++-15
+
+      - name: Install Clang 20
+        if: matrix.config.setup == 'llvm'
+        run: |
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpt.key | \
+            sudo gpg --dearmor -o /etc/apt/keyrings/llvm.gpg
+          echo "deb [signed-by=/etc/apt/keyrings/llvm.gpg] http://apt.llvm.org/noble/ llvm-toolchain-noble-20 main" | \
+            sudo tee /etc/apt/sources.list.d/llvm.list
+          sudo apt-get update
+          sudo apt-get install -y clang-20
+
+      - name: Configure
+        env:
+          CC: ${{ matrix.config.cc }}
+          CXX: ${{ matrix.config.cxx }}
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release -j
+
+      - name: Test
+        run: ctest --test-dir build --build-config Release --output-on-failure

@@ -1,9 +1,20 @@
 #pragma once
-#include <span>
-#include <variant>
+#include <cassert>
 #include <charconv>
+#include <climits> // UCHAR_MAX (used for the TokenID base offset below)
+#include <cstdint>
+#include <cstring>
+#include <iostream>
+#include <map>
+#include <optional>
+#include <ostream>
+#include <string>
+#include <string_view>
+#include <variant>
+
 #include "peglib.h"
-#include "lex_conv.h"
+#include "lua/lex_conv.h"
+
 namespace ys
 {
     namespace lua
@@ -31,17 +42,20 @@ namespace ys
         };
 
         extern const std::map<std::string_view, TokenID> str2tkid;
-        
 
-        template <peg::InputSourceType InputSource=std::span<const typename std::string::value_type>>
-        struct Tokenizer {
+        class Tokenizer {
         public:
+            // peglib's Context is now templated on the character type (char),
+            // not the input range. MatchRange was removed; semantic actions
+            // read matched text via node offsets + Context::substr.
+            using Context = peg::Context<char>;
+
             Tokenizer(const std::string& input);
             std::optional<Token> next();
             void clear() {
                 m_token_buf.id = -1;
             }
-            bool hasToken() {
+            bool hasToken() const {
                 return m_token_buf.id != -1;
             }
             Token currentToken() {
@@ -49,116 +63,15 @@ namespace ys
                 std::swap(result, m_token_buf);
                 return result;
             }
-            using Context = peg::Context<InputSource>;
-            using value_type = typename peg::Context<InputSource>::ValueType;
-            using MatchRange = typename peg::Context<InputSource>::MatchRange;
         protected:
-            peg::Context<InputSource> m_context;
+            peg::Grammar<> m_grammar;
+            Context m_context;
             Token m_token_buf;
+
+            // Scan the remaining input for `marker`, advancing the context past
+            // it on success. Returns true if the marker was found and consumed.
+            static bool consume_until_close(Context& c, const std::string& marker);
         };
 
-        template<peg::InputSourceType InputSource>
-        Tokenizer<InputSource>::Tokenizer(const std::string& input) : m_context(input) {
-            lexconv::Rules<Context>::comment_long_bracket_start.setAction([this](Context& c, MatchRange m) {
-                int level = m.end() - m.begin() - 2;
-                assert(level>=0);
-                auto end_mark = ']' >> (level * terminal('=')) >> ']';
-                Rule<> long_bracket_end = end_mark;
-                Rule<> not_closing = *terminal<char>([](char c){return c!=']';});
-                auto grammar = not_closing >> long_bracket_end;
-                auto startpos = c.mark();
-                while(!c.ended()) {
-                    grammar.parse(c);
-                }
-            });
-
-            lexconv::Rules<Context>::long_bracket_start.setAction([this](Context& c, MatchRange m) {
-                int level = m.end() - m.begin() - 2;
-                assert(level>=0);
-                auto end_mark = ']' >> (level * terminal('=')) >> ']';
-                Rule<> long_bracket_end = end_mark;
-                Rule<> not_closing = *terminal<char>([](char c){return c!=']';});
-                auto grammar = not_closing >> long_bracket_end;
-                auto startpos = c.mark();
-                while(!c.ended()) {
-                    grammar.parse(c);
-                }
-                auto endpos = c.mark() - 2 - level;
-                m_token_buf.id = static_cast<Token::TokenIDType>(TokenID::TK_STRING);
-                m_token_buf.info = std::string(startpos, endpos);
-            });
-            lexconv::Rules<Context>::ops.setAction([this](Context& c, MatchRange m){
-                std::string_view result {m.begin(), m.end()};
-                assert(result.size() > 0 && result.size() <= 3);
-                if(result.size() > 1) {
-                    auto iter = str2tkid.find(result);
-                    if(iter != str2tkid.end()) {
-                        m_token_buf.id = static_cast<Token::TokenIDType>(iter->second);
-                    }
-                    else {
-                        assert(false);
-                    }
-                }
-                else {
-                    m_token_buf.id = int(result[0]);
-                }
-            });
-
-            lexconv::Rules<Context>::name.setAction([this](Context& c, MatchRange m){
-                std::string_view result {m.begin(), m.end()};
-                auto iter = str2tkid.find(result);
-                if(iter == str2tkid.end()) {
-                    m_token_buf.id = static_cast<Token::TokenIDType>(TokenID::TK_NAME);
-                    m_token_buf.info = std::string(result);
-                }
-                else {
-                    m_token_buf.id = static_cast<Token::TokenIDType>(iter->second);
-                }
-            });
-
-            lexconv::Rules<Context>::string_literal.setAction([this](Context& c, MatchRange m) {
-                std::string_view result {m.begin()+1, m.end()-1};
-                if(m_token_buf.id == -1){
-                    m_token_buf.id = static_cast<Token::TokenIDType>(TokenID::TK_STRING);
-                    m_token_buf.info = std::string(result);
-                }
-            });
-
-            lexconv::Rules<Context>::numeral.setAction([this](Context& c, MatchRange m) {
-                std::string_view result{m.begin(), m.end()};
-                int value;
-                auto ret = std::from_chars(result.data(), result.data()+result.size(), value);
-                if(ret.ptr == result.data()+result.size()){
-                    m_token_buf.id = static_cast<Token::TokenIDType>(TokenID::TK_INT);
-                    m_token_buf.info = value;
-                }
-                else {
-                    double value;
-                    auto ret = std::from_chars(result.data(), result.data()+result.size(), value);
-                    m_token_buf.id = static_cast<Token::TokenIDType>(TokenID::TK_FLT);
-                    m_token_buf.info = value;
-                }
-            });
-        }
-
-        template<peg::InputSourceType InputSource>
-        std::optional<Token> Tokenizer<InputSource>::next(){
-            while(!m_context.ended()) {
-                bool ok = lexconv::Rules<Context>::token(m_context);
-                if(ok) {
-                    if(hasToken()){
-                        return currentToken();
-                    }
-                }
-                else{
-                    m_token_buf.id = -1;
-                    return currentToken();
-                }
-            }
-            m_token_buf.id = static_cast<Token::TokenIDType>(TokenID::TK_EOS);
-            return currentToken();
-        }
-        
     } // namespace lua
 }
-
