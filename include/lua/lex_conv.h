@@ -5,14 +5,24 @@ namespace ys::lua::lexconv {
 
 // Build the Lua 5.4 lexer grammar. Each Tokenizer instance owns a fresh
 // Grammar so its semantic actions can capture Tokenizer state independently.
+//
+// peglib API note: since the b4c7ed7 bump, terminal/terminalSeq/cut factories
+// are Grammar MEMBER factories (g.terminal(...), g.terminalSeq(...), g.cut()),
+// not free functions. The free factories hardcoded Context<elem, monostate>
+// and so could not produce expressions for a Grammar with a custom NodeType;
+// the member factories close over the Grammar's own Context. Bare character
+// literals inside >> / | / * / + still work via the value-literal overloads
+// (operator>> / operator| build a TerminalExpr from the operand's Context), so
+// only standalone factory CALLS switch to g.xxx; chars embedded in a sequence
+// or choice are unchanged.
 inline peg::Grammar<> make_grammar()
 {
     using namespace peg;
 
     Grammar<> g;
 
-    auto WS = +terminal(std::set({' ', '\f', '\t', '\v'}));
-    auto not_linebreak = terminal<char>([](char c) { return c != '\n'; });
+    auto WS = +g.terminal(std::set({' ', '\f', '\t', '\v'}));
+    auto not_linebreak = g.terminal([](char c) { return c != '\n'; });
     // Lua identifiers are ASCII-only [A-Za-z0-9_]. Cast to unsigned char before
     // any classification: std::isalpha/isalnum on a negative (signed char)
     // value is UB, and they are locale-dependent anyway. Use explicit ASCII
@@ -26,11 +36,11 @@ inline peg::Grammar<> make_grammar()
         return (u >= 'A' && u <= 'Z') || (u >= 'a' && u <= 'z') ||
                (u >= '0' && u <= '9') || u == '_';
     };
-    auto name_start = terminal<char>(is_name_start);
-    auto name_cont = terminal<char>(is_name_cont);
-    auto linebreak = terminalSeq<char>("\r\n") | terminal('\n');
-    auto digit = terminal('0', '9');
-    auto xdigit = terminal<char>([](char c) {
+    auto name_start = g.terminal(is_name_start);
+    auto name_cont = g.terminal(is_name_cont);
+    auto linebreak = g.terminalSeq("\r\n") | g.terminal('\n');
+    auto digit = g.terminal('0', '9');
+    auto xdigit = g.terminal([](char c) {
         auto u = static_cast<unsigned char>(c);
         return (u >= '0' && u <= '9') || (u >= 'a' && u <= 'f') ||
                (u >= 'A' && u <= 'F');
@@ -42,24 +52,24 @@ inline peg::Grammar<> make_grammar()
     // (1e-4, 0x1p-4), handled by `signed_decimal` below.
     auto fractional = (*digit >> '.' >> +digit) | (+digit >> '.' >> *digit);
     auto decimal = +digit;
-    auto signed_decimal = -(terminal('+') | '-') >> decimal;
-    auto hexdecimal = terminal('0') >> (terminal('x') | 'X') >> +xdigit >>
-                      -('.' >> +xdigit) >> -((terminal('p') | 'P') >> +signed_decimal);
+    auto signed_decimal = -(g.terminal('+') | '-') >> decimal;
+    auto hexdecimal = g.terminal('0') >> (g.terminal('x') | 'X') >> +xdigit >>
+                      -('.' >> +xdigit) >> -((g.terminal('p') | 'P') >> +signed_decimal);
 
     auto common_escape_code =
-        terminal('a') | 'b' | 'f' | 'n' | 'r' | 't' | 'v' |
-        (terminal('\\') >> '\\' >> 'n') | ('z' >> WS) | (3 * digit) |
-        (2 * xdigit) | (terminal('u') >> '{' >> *xdigit >> '}');
-    auto single_escape_code = terminal('\\') >> (common_escape_code | '\'');
+        g.terminal('a') | 'b' | 'f' | 'n' | 'r' | 't' | 'v' |
+        (g.terminal('\\') >> '\\' >> 'n') | ('z' >> WS) | (3 * digit) |
+        (2 * xdigit) | (g.terminal('u') >> '{' >> *xdigit >> '}');
+    auto single_escape_code = g.terminal('\\') >> (common_escape_code | '\'');
     // Inside a double-quoted string the escapable quote is ", not '. (The
     // previous code allowed \' here, which made "a\"b" un-lexable.)
-    auto double_escape_code = terminal('\\') >> (common_escape_code | '"');
-    auto single_no_escape_code = terminal<char>([](char c) { return c != '\''; });
-    auto double_no_escape_code = terminal<char>([](char c) { return c != '"'; });
+    auto double_escape_code = g.terminal('\\') >> (common_escape_code | '"');
+    auto single_no_escape_code = g.terminal([](char c) { return c != '\''; });
+    auto double_no_escape_code = g.terminal([](char c) { return c != '"'; });
 
     g["name"] = name_start >> *name_cont;
-    g["long_bracket_start"] = '[' >> *terminal('=') >> '[';
-    g["comment_long_bracket_start"] = '[' >> *terminal('=') >> '[';
+    g["long_bracket_start"] = '[' >> *g.terminal('=') >> '[';
+    g["comment_long_bracket_start"] = '[' >> *g.terminal('=') >> '[';
     auto string_single_quote =
         '\'' >> *(single_escape_code | single_no_escape_code) >> '\'';
     auto string_double_quote =
@@ -69,18 +79,18 @@ inline peg::Grammar<> make_grammar()
     // Short comment body runs to end-of-line; the terminating newline is
     // OPTIONAL so a `-- comment` at EOF (no trailing newline) still lexes as a
     // comment rather than falling through to '-' '-' name.
-    g["comment"] = terminal('-') >> '-' >>
+    g["comment"] = g.terminal('-') >> '-' >>
                    (g["comment_long_bracket_start"] | (*not_linebreak >> -linebreak));
     g["numeral"] = hexdecimal |
-                   ((fractional | decimal) >> -((terminal('e') | 'E') >> -(signed_decimal)));
-    g["ops"] = terminalSeq("...") | terminalSeq("..") | terminalSeq("<<") |
-               terminalSeq(">>") | terminalSeq("//") | terminalSeq("==") |
-               terminalSeq("~=") | terminalSeq("<=") | terminalSeq(">=") |
-               terminalSeq("::") | '+' | '-' | '*' | '/' | '%' | '^' | '#' |
+                   ((fractional | decimal) >> -((g.terminal('e') | 'E') >> -(signed_decimal)));
+    g["ops"] = g.terminalSeq("...") | g.terminalSeq("..") | g.terminalSeq("<<") |
+               g.terminalSeq(">>") | g.terminalSeq("//") | g.terminalSeq("==") |
+               g.terminalSeq("~=") | g.terminalSeq("<=") | g.terminalSeq(">=") |
+               g.terminalSeq("::") | '+' | '-' | '*' | '/' | '%' | '^' | '#' |
                '&' | '~' | '|' | '<' | '>' | '=' | '(' | ')' | '{' | '}' |
                '[' | ']' | ';' | ':' | ',' | '.';
 
-    auto cut_ = cut<>();
+    auto cut_ = g.cut();
     g["token"] = g["comment"] | (WS >> cut_) | (g["numeral"] >> cut_) |
                  (g["name"] >> cut_) | (g["string_literal"] >> cut_) |
                  g["ops"] | linebreak;

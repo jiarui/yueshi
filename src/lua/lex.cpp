@@ -195,7 +195,7 @@ Tokenizer::Tokenizer(std::string input)
             if (consume_until_close(c, end_marker)) {
                 auto body_end = c.mark() - end_marker.size();
                 m_token_buf.id = static_cast<Token::TokenIDType>(TokenID::TK_STRING);
-                m_token_buf.info = c.substr(body_start, body_end - body_start);
+                m_token_buf.info = c.input().slice(body_start, body_end - body_start);
                 m_token_buf.start = node->start_offset;
                 m_token_buf.end = c.mark();
             }
@@ -205,8 +205,8 @@ Tokenizer::Tokenizer(std::string input)
     m_grammar["ops"].set_action(
         [this](Context& c, const Context::ParseTreeNodePtr& node) -> std::monostate {
             // Owned copy — keep alive for the lookup; do not bind to string_view
-            // (substr returns by value, so a string_view over it would dangle).
-            auto result = c.substr(node->start_offset, node->end_offset - node->start_offset);
+            // (slice returns by value, so a string_view over it would dangle).
+            auto result = c.input().slice(node->start_offset, node->end_offset - node->start_offset);
             assert(result.size() > 0 && result.size() <= 3);
             if (result.size() > 1) {
                 auto iter = str2tkid.find(result);
@@ -225,7 +225,7 @@ Tokenizer::Tokenizer(std::string input)
 
     m_grammar["name"].set_action(
         [this](Context& c, const Context::ParseTreeNodePtr& node) -> std::monostate {
-            auto result = c.substr(node->start_offset, node->end_offset - node->start_offset);
+            auto result = c.input().slice(node->start_offset, node->end_offset - node->start_offset);
             auto iter = str2tkid.find(result);
             if (iter == str2tkid.end()) {
                 m_token_buf.id = static_cast<Token::TokenIDType>(TokenID::TK_NAME);
@@ -245,7 +245,7 @@ Tokenizer::Tokenizer(std::string input)
             // escapes).
             if (m_token_buf.id == -1) {
                 m_token_buf.id = static_cast<Token::TokenIDType>(TokenID::TK_STRING);
-                auto raw = c.substr(node->start_offset + 1,
+                auto raw = c.input().slice(node->start_offset + 1,
                                     (node->end_offset - node->start_offset) - 2);
                 m_token_buf.info = decode_escapes(raw);
                 m_token_buf.start = node->start_offset;
@@ -256,7 +256,7 @@ Tokenizer::Tokenizer(std::string input)
 
     m_grammar["numeral"].set_action(
         [this](Context& c, const Context::ParseTreeNodePtr& node) -> std::monostate {
-            auto result = c.substr(node->start_offset, node->end_offset - node->start_offset);
+            auto result = c.input().slice(node->start_offset, node->end_offset - node->start_offset);
 
             // Classify by lexical shape rather than "try int base-10 then fall
             // back to float": the latter mis-routes every hex literal and every
