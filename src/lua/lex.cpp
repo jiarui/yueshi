@@ -134,76 +134,43 @@ std::string decode_escapes(std::string_view raw)
 // Tokenizer implementation
 // ---------------------------------------------------------------------------
 
-bool Tokenizer::consume_until_close(Context& c, const std::string& marker)
-{
-    // Positions are now byte offsets into the input source (get_input() was
-    // removed in favour of the type-erased InputSource). Scan forward from
-    // the current offset until the closing marker is matched, consuming it.
-    while (!c.ended()) {
-        auto save = c.mark();
-        bool match = true;
-        for (char ec : marker) {
-            if (c.ended() || c.current() != ec) {
-                match = false;
-                break;
-            }
-            c.next();
-        }
-        if (match) {
-            return true;
-        }
-        c.reset(save);
-        c.next();
-    }
-    return false;
-}
-
 Tokenizer::Tokenizer(std::string input)
     : m_grammar(lexconv::make_grammar())
     , m_input(std::move(input))
     , m_context(m_input)
 {
-    // Long-bracket comment body: consume up to the matching `]=...]` and emit
-    // no token. (Opening `[==[` already consumed by the rule.)
-    m_grammar["comment_long_bracket_start"].set_action(
-        [this](Context& c, const Context::ParseTreeNodePtr& node) -> std::monostate {
-            int level = static_cast<int>(node->end_offset - node->start_offset) - 2;
-            assert(level >= 0);
-            std::string end_marker = "]" + std::string(level, '=') + "]";
-            consume_until_close(c, end_marker);
-            return {};
+    // Long-bracket comment body: the matcher in lex_conv.h handles the
+    // entire [=*[ ... ]=*] construct including body consumption; nothing
+    // to do here — no token is produced.
+
+    // Long-bracket string body: the matcher consumed [=*[ ... ]=*]; on_match
+    // computes the body range and sets the TK_STRING token.
+    m_grammar["long_bracket_start"].on_match(
+        [this](Context& c, const Context::ParseTreeNodePtr& node) {
+            auto sp_start = node->start_offset;
+            auto sp_end   = node->end_offset;
+            // Recompute level from the opening bracket characters.
+            std::size_t level = 0;
+            std::size_t i = sp_start + 1; // skip first '['
+            while (i < sp_end && c.at(i) == '=') { ++level; ++i; }
+            // i now points at the second '['; body starts after it, plus
+            // an optional newline that the matcher already skipped.
+            std::size_t body_start = i + 1;
+            if (body_start < sp_end) {
+                if (c.at(body_start) == '\r') { ++body_start;
+                    if (body_start < sp_end && c.at(body_start) == '\n') ++body_start; }
+                else if (c.at(body_start) == '\n') ++body_start;
+            }
+            // Closing bracket: ']' + level×'=' + ']' before sp_end.
+            std::size_t body_end = sp_end - level - 2;
+            m_token_buf.id = static_cast<Token::TokenIDType>(TokenID::TK_STRING);
+            m_token_buf.info = c.input().slice(body_start, body_end - body_start);
+            m_token_buf.start = sp_start;
+            m_token_buf.end = sp_end;
         });
 
-    // Long-bracket string body: consume up to the matching `]=...]`, skipping
-    // an immediately following newline per Lua convention.
-    m_grammar["long_bracket_start"].set_action(
-        [this](Context& c, const Context::ParseTreeNodePtr& node) -> std::monostate {
-            int level = static_cast<int>(node->end_offset - node->start_offset) - 2;
-            assert(level >= 0);
-            std::string end_marker = "]" + std::string(level, '=') + "]";
-            auto body_start = c.mark();
-            if (!c.ended()) {
-                if (c.current() == '\r') {
-                    c.next();
-                    if (!c.ended() && c.current() == '\n') c.next();
-                    body_start = c.mark();
-                } else if (c.current() == '\n') {
-                    c.next();
-                    body_start = c.mark();
-                }
-            }
-            if (consume_until_close(c, end_marker)) {
-                auto body_end = c.mark() - end_marker.size();
-                m_token_buf.id = static_cast<Token::TokenIDType>(TokenID::TK_STRING);
-                m_token_buf.info = c.input().slice(body_start, body_end - body_start);
-                m_token_buf.start = node->start_offset;
-                m_token_buf.end = c.mark();
-            }
-            return {};
-        });
-
-    m_grammar["ops"].set_action(
-        [this](Context& c, const Context::ParseTreeNodePtr& node) -> std::monostate {
+    m_grammar["ops"].on_match(
+        [this](Context& c, const Context::ParseTreeNodePtr& node) {
             // Owned copy — keep alive for the lookup; do not bind to string_view
             // (slice returns by value, so a string_view over it would dangle).
             auto result = c.input().slice(node->start_offset, node->end_offset - node->start_offset);
@@ -220,11 +187,10 @@ Tokenizer::Tokenizer(std::string input)
             }
             m_token_buf.start = node->start_offset;
             m_token_buf.end = node->end_offset;
-            return {};
         });
 
-    m_grammar["name"].set_action(
-        [this](Context& c, const Context::ParseTreeNodePtr& node) -> std::monostate {
+    m_grammar["name"].on_match(
+        [this](Context& c, const Context::ParseTreeNodePtr& node) {
             auto result = c.input().slice(node->start_offset, node->end_offset - node->start_offset);
             auto iter = str2tkid.find(result);
             if (iter == str2tkid.end()) {
@@ -235,14 +201,12 @@ Tokenizer::Tokenizer(std::string input)
             }
             m_token_buf.start = node->start_offset;
             m_token_buf.end = node->end_offset;
-            return {};
         });
 
-    m_grammar["string_literal"].set_action(
-        [this](Context& c, const Context::ParseTreeNodePtr& node) -> std::monostate {
-            // long_bracket_start already produced the token; only handle the
-            // single/double-quoted forms (strip the surrounding quote, decode
-            // escapes).
+    m_grammar["string_literal"].on_match(
+        [this](Context& c, const Context::ParseTreeNodePtr& node) {
+            // long_bracket_start on_match already produced the token; only
+            // handle the single/double-quoted forms.
             if (m_token_buf.id == -1) {
                 m_token_buf.id = static_cast<Token::TokenIDType>(TokenID::TK_STRING);
                 auto raw = c.input().slice(node->start_offset + 1,
@@ -251,11 +215,10 @@ Tokenizer::Tokenizer(std::string input)
                 m_token_buf.start = node->start_offset;
                 m_token_buf.end = node->end_offset;
             }
-            return {};
         });
 
-    m_grammar["numeral"].set_action(
-        [this](Context& c, const Context::ParseTreeNodePtr& node) -> std::monostate {
+    m_grammar["numeral"].on_match(
+        [this](Context& c, const Context::ParseTreeNodePtr& node) {
             auto result = c.input().slice(node->start_offset, node->end_offset - node->start_offset);
 
             // Classify by lexical shape rather than "try int base-10 then fall
@@ -321,7 +284,6 @@ Tokenizer::Tokenizer(std::string input)
             }
             m_token_buf.start = node->start_offset;
             m_token_buf.end = node->end_offset;
-            return {};
         });
 }
 
@@ -333,8 +295,8 @@ std::vector<Token> Tokenizer::tokenize()
         m_token_buf = Token{}; // clear scratch: id == -1, start/end == 0
         m_token_buf.start = tok_start;
 
-        bool ok = m_grammar.parse("token", m_context);
-        if (!ok) {
+        auto result = m_grammar.parse_ast("token", m_context);
+        if (!result) {
             // Lexing failure. peglib has already recorded the furthest failure
             // position + expected set on the context; take_error() retrieves it.
             // Emit a sentinel so the caller can detect the error.
@@ -346,9 +308,9 @@ std::vector<Token> Tokenizer::tokenize()
             break;
         }
         if (m_token_buf.id != -1) {
-            // A real token was produced (name/numeral/string/ops). Long-bracket
-            // comments and whitespace match "token" but produce no token, so we
-            // only emit when an action actually wrote one.
+            // A real token was produced (via on_match). Long-bracket comments
+            // and whitespace match "token" but produce no token, so we only
+            // emit when an on_match actually wrote one.
             out.push_back(std::move(m_token_buf));
         }
         // else: whitespace or comment consumed; keep scanning.

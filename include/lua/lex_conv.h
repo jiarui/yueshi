@@ -68,8 +68,38 @@ inline peg::Grammar<> make_grammar()
     auto double_no_escape_code = g.terminal([](char c) { return c != '"'; });
 
     g["name"] = name_start >> *name_cont;
-    g["long_bracket_start"] = '[' >> *g.terminal('=') >> '[';
-    g["comment_long_bracket_start"] = '[' >> *g.terminal('=') >> '[';
+
+    // Long-bracket matcher (match-time primitive). The opening bracket level N
+    // (number of '=' between the two '[') determines the closing bracket: "]"
+    // + N×"=" + "]". Pure PEG cannot express this dynamic level, so a matcher
+    // fn handles the entire construct [=*[ ... ]=*] and reports the consumed
+    // span. MatcherExpr owns the position advance; the fn only reads the input.
+    auto lua_long_bracket = [](auto& c, Span) -> std::optional<Span> {
+        std::size_t pos = c.mark();
+        if (pos + 2 > c.input_size() || c.at(pos) != '[') return std::nullopt;
+        std::size_t level = 0, i = pos + 1;
+        while (i < c.input_size() && c.at(i) == '=') { ++level; ++i; }
+        if (i >= c.input_size() || c.at(i) != '[') return std::nullopt;
+        ++i;
+        // Skip immediately-following newline (Lua convention).
+        if (i < c.input_size()) {
+            if (c.at(i) == '\r') { ++i; if (i < c.input_size() && c.at(i) == '\n') ++i; }
+            else if (c.at(i) == '\n') ++i;
+        }
+        std::size_t scan = i;
+        while (scan + level + 2 <= c.input_size()) {
+            if (c.at(scan) == ']' && c.at(scan + level + 1) == ']') {
+                bool ok = true;
+                for (std::size_t j = 0; j < level; ++j)
+                    if (c.at(scan + 1 + j) != '=') { ok = false; break; }
+                if (ok) return Span{pos, scan + level + 2};
+            }
+            ++scan;
+        }
+        return std::nullopt;
+    };
+    g["long_bracket_start"] = g.matcher(lua_long_bracket);
+    g["comment_long_bracket_start"] = g.matcher(lua_long_bracket);
     auto string_single_quote =
         '\'' >> *(single_escape_code | single_no_escape_code) >> '\'';
     auto string_double_quote =

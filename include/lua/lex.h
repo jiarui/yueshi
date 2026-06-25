@@ -94,10 +94,6 @@ namespace ys
             // single grammar.parse("token") call; tokenize() swaps it out
             // after each successful scan. Reset to id == -1 before each parse.
             Token m_token_buf;
-
-            // Scan the remaining input for `marker`, advancing the context past
-            // it on success. Returns true if the marker was found and consumed.
-            static bool consume_until_close(Context& c, const std::string& marker);
         };
 
     } // namespace lua
