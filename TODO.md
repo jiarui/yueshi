@@ -29,6 +29,12 @@ yueshi is a Lua 5.4 interpreter built on
 - Official Lua 5.4.8 test suite integrated as a parser corpus
   (`test/parser_corpus.cpp` over `test/corpus/lua-5.4.8-tests/`): 33/33 clean,
   with a known-failure allowlist as the regression guard
+- **M2.0 Tree-walking evaluator** — GC-first runtime: tagged-union `LuaValue`,
+  intrusive `GCObject` header on every collectable, `Heap`-owned objects with
+  stop-the-world mark-sweep (no `shared_ptr`; cycles collected by reachability),
+  Lua 5.4 int/float subtype arithmetic, closures, tables, multires, 14 builtins.
+  evaluator_test 83/83 (2 581 assertions) + gc_test 9/9 (32 assertions) —
+  green under ASan + UBSan (leak-checked). `yueshi <file.lua>` runs end-to-end.
 
 ## Phase 1 — Lexer (double-pass)
 
@@ -73,6 +79,26 @@ yueshi is a Lua 5.4 interpreter built on
 
 ## Phase 3 — Validation
 
+- [x] **M2.0 Tree-walking evaluator** — GC-first runtime implemented and green.
+      Runtime model (`value.h`): a tagged-union `LuaValue` (nil/bool/int/float/
+      string/table/closure/builtin); collectable objects derive an intrusive
+      `GCObject` header and are owned exclusively by the `Heap`. No
+      `shared_ptr` anywhere — aliasing is non-owning pointers, so cycles and
+      escaping closures are collected by reachability (mark-sweep), not
+      refcounting. Stop-the-world mark-sweep (`heap.h`/`heap.cpp`) reclaims
+      unreachable objects between statements from the live environment chain.
+      Lua 5.4 integer/float subtype arithmetic (`numops.h`): `/`→float, `//`/
+      `%` floor, `^`→float, integer overflow wrap, bitwise int-only (errors on
+      floats), cross-subtype `1==1.0`, `3.0`≠`3` string form. Control flow
+      (if/elseif/else, while, repeat-until, numeric-for, generic-for, break,
+      return, do/end), closures with lexical capture, varargs, multires (last-
+      expr expansion, `Paren` truncation), tables (positional/named/bracketed
+      ctor, get/set, `#` border, aliasing), method dispatch (`obj:m()` with
+      implicit `self`), and 14 builtins (`print`/`type`/`tostring`/`tonumber`/
+      `error`/`assert`/`ipairs`/`pairs`/`next`/`select`/`rawget`/`rawset`/
+      `rawequal`/`rawlen`). Tests: evaluator 83/83 (2 581 assertions), GC 9/9
+      (32 assertions), both green under ASan + UBSan with leak detection.
+      The `yueshi <file.lua>` CLI runs Lua end-to-end.
 - [ ] Error-recovery study on real-world Lua sources — deferred to M4
       (pcall + error handling). peglib's recover API (`recover_set` /
       `recover_eol` / `set_recovery`) exists but no parser rule uses it yet;
@@ -86,20 +112,27 @@ yueshi is a Lua 5.4 interpreter built on
 
 ## Future Milestones (not in current scope)
 
-- **M2: Tree-walking evaluator** — `LuaValue` (nil/bool/number/string/table),
-  closures, environments, metatables, basic operators
-- **M3: Standard library subset** — `print`, `string`, `table`, `math`, `io`,
-  `os`, optional `coroutine`
-- **M4: Full stdlib + GC** — mark-sweep or ref-count + cycle detection,
-  `pcall` error handling, complete official test suite
+- **M2.x: Metatables + goto/labels** — metamethods (arithmetic, index, call),
+  `setmetatable`/`getmetatable`, and goto/label resolution (currently raise a
+  clear "not yet supported" runtime error). Build on the M2.0 GC foundation.
+- **M3: Standard library subset** — `string`, `table`, `math`, `io`, `os`,
+  optional `coroutine`, real `_G`/`_ENV` table semantics (globals are modeled
+  via the root Environment for now).
+- **M4: Full stdlib + advanced GC** — incremental/generational GC + finalizers
+  (the `<close>` attribute is a no-op in M2.0), `pcall`/`error` objects,
+  complete official test suite.
 - **M5: Bytecode VM** — register-based compiler + VM for performance parity
-  with reference Lua
+  with reference Lua.
 
 ## Open Design Decisions
 
 | Decision | Choice | Rationale |
 | ---      | ---    | ---       |
-| Pass model | Double-pass (char → token → AST) | Cleaner lexer/parser separation; matches reference Lua |
+| Pass model | Double-pass (char → token → AST) → interpret | Cleaner lexer/parser separation; matches reference Lua |
 | Precedence | Explicit layering (14 levels) | PEG left-recursion is precedence-unaware |
+| Value model | Tagged union `LuaValue` + intrusive `GCObject` | GC tracing is one `switch`; matches reference Lua's `TValue` shape |
+| Object ownership | `Heap`-owned (single owner), non-owning pointers elsewhere | `shared_ptr` would model co-ownership of aliased data; a single owner + reachability collector is unambiguous and collects cycles |
+| GC | Stop-the-world mark-sweep, designed in at the floor | Cycles + escaping closures need reachability, not refcounting; bolting GC on later means redesigning the object layout |
+| Numbers | Lua 5.4 int/float subtypes | Correct `/ // % ^` semantics; matches the lexer's `TK_INT`/`TK_FLT` split |
 | Test framework | doctest (bundled in peglib) | Header-only, zero external deps; already used by peglib upstream |
 | peglib integration | Git submodule | Tracks upstream peglib improvements independently |

@@ -47,7 +47,7 @@ namespace ys
             // where N is the token index and <off> is the token's source byte
             // offset (Token::start). The Parser only has tokens, not the
             // original source text, so it cannot resolve line:col directly —
-            // the caller (e.g. ysState, which holds the source file) can map
+            // the caller (e.g. State, which holds the source file) can map
             // <off> via a peg::SourceMap for a human-readable location.
             //
             // Combines peglib's furthest-failure (take_error) and recovery-

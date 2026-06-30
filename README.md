@@ -6,20 +6,29 @@ with packrat memoization, left-recursion support, and a cut operator.
 
 ## Status
 
-The **lexer** and **parser** are feature-complete. The lexer covers full
-Lua 5.4 lexical syntax (numerals incl. hex floats, escape decoding,
+The **lexer**, **parser**, and **evaluator** are implemented. The lexer covers
+full Lua 5.4 lexical syntax (numerals incl. hex floats, escape decoding,
 long-bracket strings/comments, all operators and keywords) with peglib-backed
 error diagnostics. The **parser** produces a typed 38-node AST (14-level
 precedence ladder, suffix-loop `prefixexp`, S-expression printer) and passes
 **56/56** structural unit tests (1 534 assertions) plus the **official Lua
 5.4.8 test suite as a corpus** (33/33 clean parses, with a known-failure
-allowlist as a regression guard). Both gates are green under ASan + UBSan
-with leak detection. The **evaluator** (tree-walking interpreter) is the next
-milestone. See [TODO.md](TODO.md) for the full roadmap.
+allowlist as a regression guard). The **evaluator** is a GC-first
+tree-walking interpreter: a tagged-union value model with an intrusive
+mark-sweep collector (no `shared_ptr` — ownership is singular, in the Heap),
+Lua 5.4 integer/float subtype arithmetic, closures, tables, multires, and a
+minimal standard library (`print`/`type`/`tostring`/`tonumber`/`error`/
+`assert`/`ipairs`/`pairs`/`next`/`select`/`rawget`/`rawset`/`rawequal`/
+`rawlen`). It passes **83/83** evaluator unit tests (2 581 assertions) and a
+**9/9** GC unit suite (32 assertions) that verifies unreachable cycles are
+collected and escaping closures keep their captured environment alive. All
+gates are green under ASan + UBSan with leak detection. Metatables, goto/
+labels, and the full standard library are the next milestones.
+See [TODO.md](TODO.md) for the full roadmap.
 
 ## Architecture
 
-yueshi uses a **double-pass** architecture:
+yueshi uses a **double-pass + interpret** architecture:
 
 1. **Lexer** (char → token): Tokenizes Lua source into `Token` objects with
    `TokenID`, `TokenValue` (variant of int/float/string), and source position.
@@ -27,6 +36,14 @@ yueshi uses a **double-pass** architecture:
 2. **Parser** (token → AST): Parses the token stream into a typed AST using
    explicit 14-level operator precedence (not PEG left-recursion, which is
    precedence-unaware).
+3. **Evaluator** (AST → values): A tree-walking interpreter over the typed
+   AST. Runtime values are a tagged union (`LuaValue`); collectable objects
+   (`String`/`Table`/`Closure`/`Builtin`/`Environment`) derive an intrusive
+   `GCObject` header and are owned exclusively by the `Heap`, which reclaims
+   them via stop-the-world mark-sweep from a root set (the live environment
+   chain). No `shared_ptr`: aliasing is non-owning pointers, and cycles are
+   collected by reachability — the whole point of designing GC in at the
+   floor rather than bolting it on.
 
 ## Project Layout
 
@@ -37,16 +54,24 @@ include/
     lex.h          Token types, Tokenizer template
     lex_conv.h     PEG grammar rules for Lua lexing
     parser.h       Parser skeleton
-    object.h       Lua object model
-    state.h        Interpreter state
-  yueshi.h         Public API
-  ysState.h        State management
+    parser_conv.h  Token-level PEG grammar + semantic actions
+    ast.h          Typed 38-node std::variant AST
+    ast_print.h    S-expression AST printer
+    value.h        Runtime value model (LuaValue, GCObject, Table, ...)
+    heap.h         Heap: owner of GC objects + mark-sweep collector
+    numops.h       Number-aware arithmetic (Lua 5.4 int/float subtypes)
+    evaluator.h    Tree-walking evaluator
+    state.h        Interpreter State (owns Heap + drives lex→parse→eval)
 src/
   lua/
     lex.cpp        Token string maps, operator<<
     parser.cpp     Parser implementation
-  yueshi.cpp       Main entry point
-  yueshic.cpp      Compiler CLI
+    heap.cpp       Heap + GC tracer + key normalization
+    numops.cpp     Arithmetic primitives
+    evaluator.cpp  Evaluator + builtins
+    state.cpp      State driver (run_string / run_file)
+  yueshi.cpp       Interpreter CLI (yueshi <file.lua>)
+  yueshic.cpp      Compiler CLI (stub — bytecode VM is M5)
 test/
   test.cpp              Unit tests (doctest)
   lex_correctness.cpp   Lexer correctness / regression suite
@@ -54,8 +79,10 @@ test/
   parser_structure.cpp  Structural navigation tests over the typed AST
   ast_check.h           Header-only typed AST accessors (used by the above)
   parser_corpus.cpp     Official-suite parser corpus acceptance
+  gc_test.cpp           Heap/GC unit tests (mark-sweep, cycles, escaping envs)
+  evaluator_test.cpp    Evaluator unit tests (values, operators, control flow,
+                       closures, tables, multires, builtins)
   corpus/lua-5.4.8-tests/  Lua 5.4.8 official test suite (checked in)
-  test.lua              Test Lua source
 ```
 
 ## Build
@@ -66,6 +93,12 @@ cd yueshi
 cmake -B build
 cmake --build build
 ctest --test-dir build --output-on-failure
+```
+
+Run a Lua file through the interpreter:
+
+```sh
+./build/yueshi path/to/script.lua
 ```
 
 To run the lexer under ASan + UBSan (the correctness gate used by CI):

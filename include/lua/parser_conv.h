@@ -848,6 +848,17 @@ inline peg::Grammar<Token, AstNode> make_grammar()
             FuncStat node;
             node.name = std::move(get<FuncName>(fnname));
             node.body = std::move(get<FuncBody>(bodynode));
+            // §3.4.11 sugar: `function a.b:c (...) body end` is equivalent to
+            // `a.b.c = function(self, ...) body end`. When a method name is
+            // present, prepend an implicit `self` parameter (the receiver) so
+            // the body can name it. This is the desugar reference Lua performs.
+            if (node.name.method) {
+                Param self;
+                self.kind = Param::Kind::Name;
+                self.name = "self";
+                node.body.params.insert(node.body.params.begin(),
+                                        std::move(self));
+            }
             node.start = bstart(c, sp);
             node.end = bend(c, sp);
             return node;

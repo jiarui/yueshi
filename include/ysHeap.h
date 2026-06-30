@@ -1,4 +1,0 @@
-namespace ys {
-    class Heap {
-    };
-}

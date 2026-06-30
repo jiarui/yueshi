@@ -59,3 +59,32 @@ target_compile_definitions(yueshi_lua_parser_corpus PRIVATE
     YUESHI_CORPUS_DIR="${CMAKE_SOURCE_DIR}/test/corpus/lua-5.4.8-tests")
 yueshi_test_enable_sanitizers(yueshi_lua_parser_corpus)
 add_test(NAME yueshi_lua_parser_corpus COMMAND yueshi_lua_parser_corpus)
+
+# Heap/GC unit tests: verify the runtime memory layer (value.h + heap.cpp) in
+# isolation, before the evaluator is stacked on top. heap.cpp is the only TU
+# under test (the object types are header-only).
+add_executable(yueshi_lua_gc_test
+    gc_test.cpp
+    ../src/lua/heap.cpp)
+target_link_libraries(yueshi_lua_gc_test PRIVATE peglib yueshi_test_main)
+target_include_directories(yueshi_lua_gc_test PRIVATE
+    ${doctest_include_dir}
+    ${CMAKE_SOURCE_DIR}/include)
+yueshi_test_enable_sanitizers(yueshi_lua_gc_test)
+add_test(NAME yueshi_lua_gc_test COMMAND yueshi_lua_gc_test)
+
+# Evaluator unit tests: lex -> parse -> Evaluator::run, assert on returned
+# LuaValues. The evaluator + heap + parser + lex TUs compile in here.
+add_executable(yueshi_lua_evaluator_test
+    evaluator_test.cpp
+    ../src/lua/evaluator.cpp
+    ../src/lua/numops.cpp
+    ../src/lua/heap.cpp
+    ../src/lua/parser.cpp
+    ../src/lua/lex.cpp)
+target_link_libraries(yueshi_lua_evaluator_test PRIVATE peglib yueshi_test_main)
+target_include_directories(yueshi_lua_evaluator_test PRIVATE
+    ${doctest_include_dir}
+    ${CMAKE_SOURCE_DIR}/include)
+yueshi_test_enable_sanitizers(yueshi_lua_evaluator_test)
+add_test(NAME yueshi_lua_evaluator_test COMMAND yueshi_lua_evaluator_test)
