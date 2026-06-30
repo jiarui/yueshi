@@ -22,7 +22,10 @@ inline peg::Grammar<> make_grammar()
     Grammar<> g;
 
     auto WS = +g.terminal(std::set({' ', '\f', '\t', '\v'}));
-    auto not_linebreak = g.terminal([](char c) { return c != '\n'; });
+    // A "not linebreak" char excludes all three newline forms: \n (Unix),
+    // \r\n (Windows), and bare \r (old Mac). Excluding \r here keeps a comment
+    // body from running past a CR-only line ending.
+    auto not_linebreak = g.terminal([](char c) { return c != '\n' && c != '\r'; });
     // Lua identifiers are ASCII-only [A-Za-z0-9_]. Cast to unsigned char before
     // any classification: std::isalpha/isalnum on a negative (signed char)
     // value is UB, and they are locale-dependent anyway. Use explicit ASCII
@@ -38,7 +41,10 @@ inline peg::Grammar<> make_grammar()
     };
     auto name_start = g.terminal(is_name_start);
     auto name_cont = g.terminal(is_name_cont);
-    auto linebreak = g.terminalSeq("\r\n") | g.terminal('\n');
+    // Newline: \r\n (Windows), \n (Unix), or bare \r (old Mac). CRLF must be
+    // tried FIRST — PEG ordered choice, else the lone-\r branch would eat the
+    // CR half of a CRLF before the LF could be matched.
+    auto linebreak = g.terminalSeq("\r\n") | g.terminal('\n') | g.terminal('\r');
     auto digit = g.terminal('0', '9');
     auto xdigit = g.terminal([](char c) {
         auto u = static_cast<unsigned char>(c);

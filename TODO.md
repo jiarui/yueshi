@@ -38,20 +38,23 @@ yueshi is a Lua 5.4 interpreter built on
       - [x] All operators including `//`, `<<`, `>>`, `~`, `...`, `::`
       - [x] Hex floats and exponents (`0xA23p-4`)
       - [x] Unicode escape sequences (`\u{XXXX}`)
-- [ ] `TokenStream` API (`peek(n)` / `next()` / `expect(TokenID)`) — deferred to
-      Phase 2; `tokenize()` + peglib `Context<Token>` cover the parser's needs
+- [~] `TokenStream` API (`peek(n)` / `next()` / `expect(TokenID)`) — **won't-do**;
+      superseded by eager `tokenize()` + peglib `Context<Token>` driving a
+      declarative token-level PEG. A tree-walking evaluator (M2) walks the AST,
+      not tokens, so this hand-written cursor API has no consumer.
 - [x] Keyword vs name disambiguation via `cut`
-- [ ] Comprehensive lexer test suite (Lua 5.4 reference lexer corpus) —
-      correctness/regression cases are in `test/lex_correctness.cpp`; the
-      official suite now lexes clean as part of the parser corpus
-      (`test/parser_corpus.cpp`, 33/33), which surfaced and fixed several
-      real lexer gaps (shebang, `\ddd` 1–3 digits, raw newlines in short
-      strings, `\\` / `\z` / line-continuation escapes, hex floats with no
-      integer part). A dedicated lexer-only corpus run is still pending.
+- [x] Comprehensive lexer test suite — `test/lex_correctness.cpp` holds 22
+      named correctness/regression cases, and the official suite is exercised
+      on every `.lua` as part of the parser corpus (`test/parser_corpus.cpp`
+      lexes+checks 33/33), which surfaced and fixed several real lexer gaps
+      (shebang, `\ddd` 1–3 digits, raw newlines in short strings, `\\` / `\z`
+      / line-continuation escapes, hex floats with no integer part).
 - [x] Minor: reject raw newlines inside short strings (H8.3) — short-string
       scan now excludes `\n`/`\r`, so an unterminated string errors at its real
       location instead of running on to a later quote
-- [ ] Minor: bare `\r` line endings (H8.2)
+- [x] Minor: bare `\r` line endings (H8.2) — `linebreak` now matches `\r\n`,
+      `\n`, and lone `\r`; `not_linebreak` excludes `\r` so comments and short
+      strings stop at a CR-only line ending (covered by `H8.2` regression cases)
 
 ## Phase 2 — Parser → Typed AST
 
@@ -69,9 +72,16 @@ yueshi is a Lua 5.4 interpreter built on
 
 ## Phase 3 — Validation
 
-- [ ] Error-recovery study on real-world Lua sources
+- [ ] Error-recovery study on real-world Lua sources — deferred to M4
+      (pcall + error handling). peglib's recover API (`recover_set` /
+      `recover_eol` / `set_recovery`) exists but no parser rule uses it yet;
+      the parser currently stops at the first syntax error. Most valuable once
+      a REPL/LSP surfaces multiple errors per file.
 - [ ] Performance benchmark: parse 1 MB Lua file (target: cut release keeps
-      memory bounded)
+      memory bounded) — deferred to M5 (bytecode VM, perf parity with
+      reference Lua). The current corpus's largest file is ~42 KB; pure parser
+      throughput has no M2 impact, and a benchmark is most meaningful as part
+      of a full perf suite against reference Lua.
 
 ## Future Milestones (not in current scope)
 

@@ -358,3 +358,36 @@ TEST_CASE("hex float edge forms") {
         CHECK(toks[0].id == id_of(TokenID::TK_FLT));
     }
 }
+
+// ---------------------------------------------------------------------------
+// H8.2: bare carriage returns. The lexer must treat a lone \r (old-Mac line
+// ending) as a newline, both between tokens and as a comment terminator.
+// Previously `linebreak` only matched \r\n and \n, so a bare \r was no token
+// at all (lex error), and `not_linebreak` didn't stop at \r, so a comment ran
+// past a CR-only line ending.
+// ---------------------------------------------------------------------------
+TEST_CASE("H8.2 bare carriage returns") {
+    SUBCASE("CR-only separates statements") {
+        // "x = 1\ry = 2\r" — the \r must act as a line break between tokens.
+        auto toks = lex_ok("x = 1\ry = 2\r");
+        // Two NAME tokens (x, y), no error sentinel.
+        int names = 0;
+        for (const auto& tk : toks) if (tk.id == id_of(TokenID::TK_NAME)) ++names;
+        CHECK(names == 2);
+    }
+    SUBCASE("CR terminates a comment") {
+        // "-- c\rx": the comment ends at \r; x is a separate name, not part of
+        // the comment body.
+        auto toks = lex_ok("-- c\rx");
+        REQUIRE(toks.size() == 2);
+        CHECK(toks[0].id == id_of(TokenID::TK_NAME));
+        CHECK(std::get<2>(toks[0].info) == "x");
+    }
+    SUBCASE("mixed CRLF, LF, and CR") {
+        // All three line endings in one chunk must lex cleanly.
+        auto toks = lex_ok("a = 1\r\nb = 2\nc = 3\r");
+        int names = 0;
+        for (const auto& tk : toks) if (tk.id == id_of(TokenID::TK_NAME)) ++names;
+        CHECK(names == 3);
+    }
+}

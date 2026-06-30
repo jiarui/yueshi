@@ -298,8 +298,18 @@ std::vector<Token> Tokenizer::tokenize()
     // the main scan. No diagnostic, no token — the line is simply consumed.
     if (m_context.input_size() > 0 && m_context.at(0) == '#') {
         std::size_t i = 0;
-        while (i < m_context.input_size() && m_context.at(i) != '\n') ++i;
-        if (i < m_context.input_size()) ++i; // consume the newline, if present
+        // Stop at any newline byte (\n Unix, \r old-Mac, or the \r of \r\n).
+        while (i < m_context.input_size() &&
+               m_context.at(i) != '\n' && m_context.at(i) != '\r') ++i;
+        if (i < m_context.input_size()) {
+            // Consume the line terminator: CRLF is two bytes, \n or \r one.
+            if (m_context.at(i) == '\r' && i + 1 < m_context.input_size() &&
+                m_context.at(i + 1) == '\n') {
+                i += 2;
+            } else {
+                ++i;
+            }
+        }
         m_context.reset(i);
     }
 
