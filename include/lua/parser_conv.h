@@ -191,18 +191,42 @@ inline peg::Grammar<Token, AstNode> make_grammar()
     }
 
     // =======================================================================
-    // var / functioncall / prefixexp — the §9 left-recursive triangle.
+    // prefixexp / var / functioncall — a SUFFIX LOOP (NOT the §9 left
+    // recursion). This is the load-bearing deviation from the Lua 5.4 EBNF,
+    // and it is mandatory: the verbatim §9 triangle is NOT executable as PEG.
     //
-    //   var           ::= Name | var '.' Name | var '[' exp ']'
-    //   functioncall  ::= var args | var ':' Name args
-    //   args          ::= '(' [explist] ')' | tableconstructor | literal_string
-    //   prefixexp     ::= var | functioncall | '(' exp ')'
+    //   §9 (specification, left-recursive, unparseable in PEG):
+    //     prefixexp    ::= var | functioncall | '(' exp ')'
+    //     var          ::= Name | prefixexp '[' exp ']' | prefixexp '.' Name
+    //     functioncall ::= prefixexp args | prefixexp ':' Name args
     //
-    // NOTE on the original BNF: it writes `prefixexp '.' Name` etc., but since
-    // `prefixexp ::= var | functioncall | '(' exp ')'`, a '.' suffix can only
-    // legitimately apply to a var (a functioncall followed by '.' is a syntax
-    // error, and '(exp).name' reduces to var). The seed-grow converges to the
-    // var-centred form below, which is equivalent and what the AST needs.
+    //   PEG here (executable, same language):
+    //     primary       ::= Name | '(' exp ')'
+    //     suffix        ::= '.' Name | '[' exp ']' | args | ':' Name args
+    //     prefixexp     ::= primary { suffix }
+    //
+    // WHY the verbatim form fails in PEG (not a peglib bug): `var` and
+    // `functioncall` share the `prefixexp` prefix, and PEG's ordered choice
+    // commits to the first alternative that succeeds *at that prefix*, before
+    // the distinguishing suffix (`args`) is even visible. So no single branch
+    // order can satisfy both call sites: the EXPRESSION site (simple_exp →
+    // prefixexp) needs prefixexp to absorb a trailing call, while the CALL
+    // site (call_plain = prefixexp args) needs it to stop before one. This is
+    // the same reason the reference C parser uses a suffix loop (`lcode.c`
+    // `suffixedexp`): the §9 EBNF is a specification, not an executable
+    // procedure, and every deterministic parser (PEG, recursive descent) must
+    // express it as a suffix loop. peglib's seed-grow left recursion works on
+    // cooperating shapes (see its lr_token_triangle_test) but cannot resolve
+    // this shared-prefix mutual recursion — confirmed empirically: every
+    // input parses under SOME alternation order, but no single order parses
+    // all inputs.
+    //
+    // The suffix loop below replaces the entire var/functioncall/prefixexp
+    // triangle. Each suffix is its own rule (so the inner alternation has a
+    // uniform AstNode result type) and builds its node with the base slot
+    // (Field.obj / Index.obj / Call.func / MethodCall.obj) LEFT EMPTY; the
+    // prefixexp fold fills that slot from the running accumulator, producing
+    // left-associative nesting (a.b.c → Field(c, Field(b, Name(a)))).
     // =======================================================================
 
     // tableconstructor + fields (defined before args, which can be a table).
@@ -294,58 +318,50 @@ inline peg::Grammar<Token, AstNode> make_grammar()
         h.set_action([](Ctx&, Span, AstNode n) -> AstNode { return n; });
     }
 
-    // var / functioncall / prefixexp — the §9 left-recursive triangle.
-    //
-    //   prefixexp    ::= var | functioncall | '(' exp ')'
-    //   var          ::= Name | prefixexp '[' exp ']' | prefixexp '.' Name
-    //   functioncall ::= prefixexp args | prefixexp ':' Name args
-    //
-    // Transcribed VERBATIM: the left recursion routes through `prefixexp`
-    // (NOT directly through var). Each production is its own rule so its
-    // action arg shape is fixed; the alternations at prefixexp/var/functioncall
-    // unify to AstNode.
-    //
-    // ORDERING within alternations matters for peglib's seed-grow under
-    // ordered-choice semantics. The rule (verified empirically across all
-    // permutations of each alternation's branches):
-    //
-    //   • In `var`, the recursive suffixes (var_field, var_index) MUST precede
-    //     the base case (var_name). If base is first, it matches the leading
-    //     Name of the current seed every iteration and short-circuits before
-    //     the suffix is re-evaluated → no growth. When suffixes come first,
-    //     each growth iteration tries them against the grown seed and extends.
-    //
-    //   • In `prefixexp`, var MUST precede functioncall (the opposite of the
-    //     suffix-first rule above). peglib's lr_token_triangle_test argues for
-    //     functioncall-first, but its triangle is a stripped-down model that
-    //     omits yueshi's precedence ladder and rule actions; in the REAL
-    //     grammar functioncall-first plants a zero-width seed and nothing grows
-    //     (see the comment on the prefixexp rule below). With var-first the
-    //     seed grows for every suffix form, and functioncall is reached
-    //     directly from stat_call / simple_exp instead of growing through
-    //     prefixexp.
+    // -----------------------------------------------------------------------
+    // SUFFIX-LOOP grammar for prefixexp/var/functioncall (see the design
+    // comment above). Each suffix rule builds its node with the base slot
+    // empty; the prefixexp fold fills it from the accumulator. Defined before
+    // `args` uses them? No — args is already defined above; these reference
+    // g["args"], g["name_token"], g["exp"], all of which precede this block.
+    // -----------------------------------------------------------------------
+
+    // Base case (§9 primaryexp): a Name, or '(' exp ')' → Paren.
     {
-        auto h = (g["var_name"] = g["name_token"]);
-        h.set_action([](Ctx&, Span, AstNode n) -> AstNode { return n; });
-    }
-    {
-        // prefixexp '.' Name → Field{obj, name}.
-        auto h = (g["var_field"] = g["prefixexp"] >> tok_char('.') >> g["name_token"]);
-        h.set_action([bstart, bend](Ctx& c, Span sp, AstNode obj, AstNode nm) -> AstNode {
-            Field node;
-            node.obj = Box{std::move(obj)};
-            node.name = get<Name>(nm).name;
+        // '(' exp ')' → Paren{exp}. Preserved in the AST (not collapsed) so a
+        // later multires-adjustment pass can see parens (§3.4.12: (f()) vs f()).
+        auto h = (g["primary_parens"] = tok_char('(') >> g["exp"] >> tok_char(')'));
+        h.set_action([bstart, bend](Ctx& c, Span sp, AstNode e) -> AstNode {
+            Paren node;
+            node.exp = Box{std::move(e)};
             node.start = bstart(c, sp);
             node.end = bend(c, sp);
             return node;
         });
     }
     {
-        // prefixexp '[' exp ']' → Index{obj, key}.
-        auto h = (g["var_index"] = g["prefixexp"] >> tok_char('[') >> g["exp"] >> tok_char(']'));
-        h.set_action([bstart, bend](Ctx& c, Span sp, AstNode obj, AstNode key) -> AstNode {
+        // primary ::= Name | '(' exp ')'. name_token already yields Name.
+        auto h = (g["primary"] = g["name_token"] | g["primary_parens"]);
+        h.set_action([](Ctx&, Span, AstNode n) -> AstNode { return n; });
+    }
+
+    // --- the four suffix forms (each leaves the base slot empty) ---
+    {
+        // '.' Name → Field{obj=∅, name}. obj filled by the prefixexp fold.
+        auto h = (g["suffix_field"] = tok_char('.') >> g["name_token"]);
+        h.set_action([bstart, bend](Ctx& c, Span sp, AstNode nm) -> AstNode {
+            Field node;
+            node.name = get<Name>(nm).name;  // no leading dot; printer adds it
+            node.start = bstart(c, sp);
+            node.end = bend(c, sp);
+            return node;
+        });
+    }
+    {
+        // '[' exp ']' → Index{obj=∅, key}. obj filled by the fold.
+        auto h = (g["suffix_index"] = tok_char('[') >> g["exp"] >> tok_char(']'));
+        h.set_action([bstart, bend](Ctx& c, Span sp, AstNode key) -> AstNode {
             Index node;
-            node.obj = Box{std::move(obj)};
             node.key = Box{std::move(key)};
             node.start = bstart(c, sp);
             node.end = bend(c, sp);
@@ -353,59 +369,14 @@ inline peg::Grammar<Token, AstNode> make_grammar()
         });
     }
     {
-        // var ::= prefixexp '.' Name | prefixexp '[' exp ']' | Name.
-        // Recursive suffixes BEFORE base case so the seed-grow extends.
-        auto h = (g["var"] = g["var_field"] | g["var_index"] | g["var_name"]);
-        h.set_action([](Ctx&, Span, AstNode n) -> AstNode { return n; });
-    }
-
-    {
-        // prefixexp args → Call{func, args}.
-        auto h = (g["call_plain"] = g["prefixexp"] >> g["args"]);
-        h.set_action([bstart, bend](Ctx& c, Span sp, AstNode fn, AstNode argsnode) -> AstNode {
-            Call node;
-            node.func = Box{std::move(fn)};
-            if (holds<Call>(argsnode)) {
-                node.args = std::move(get<Call>(argsnode).args);
-            } else {
-                node.args.emplace_back(Box{std::move(argsnode)});
-            }
-            node.start = bstart(c, sp);
-            node.end = bend(c, sp);
-            return node;
-        });
-    }
-    {
-        // prefixexp ':' Name args → MethodCall{obj, method, args}.
-        auto h = (g["call_method"] = g["prefixexp"] >> tok_char(':') >> g["name_token"] >> g["args"]);
-        h.set_action([bstart, bend](Ctx& c, Span sp, AstNode obj, AstNode nm, AstNode argsnode)
-                         -> AstNode {
-            MethodCall node;
-            node.obj = Box{std::move(obj)};
-            node.method = get<Name>(nm).name;
-            if (holds<Call>(argsnode)) {
-                node.args = std::move(get<Call>(argsnode).args);
-            } else {
-                node.args.emplace_back(Box{std::move(argsnode)});
-            }
-            node.start = bstart(c, sp);
-            node.end = bend(c, sp);
-            return node;
-        });
-    }
-    {
-        // Method-call postfix used by `functioncall` below: ':' Name args,
-        // folded to a MethodCall whose obj slot is filled by the caller (the
-        // accumulated prefix). Factored into its own rule so the alternation
-        // `args | call_method_tail` has a uniform AstNode result type
-        // (args → Call/TableCtor/StrLit; tail → MethodCall) — peglib's
-        // alternation requires all branches to share a result type.
-        auto h = (g["call_method_tail"] =
-                      tok_char(':') >> g["name_token"] >> g["args"]);
+        // ':' Name args → MethodCall{obj=∅, method, args}. obj filled by the
+        // fold. args unwraps exactly like the old call_method/call_method_tail
+        // (args_paren carries the arg list; table/string is a single arg).
+        auto h = (g["suffix_method"] = tok_char(':') >> g["name_token"] >> g["args"]);
         h.set_action([bstart, bend](Ctx& c, Span sp, AstNode nm, AstNode argsnode)
                          -> AstNode {
             MethodCall node;
-            node.method = get<Name>(nm).name;
+            node.method = get<Name>(nm).name;  // no colon; printer adds it
             if (holds<Call>(argsnode)) {
                 node.args = std::move(get<Call>(argsnode).args);
             } else {
@@ -416,30 +387,47 @@ inline peg::Grammar<Token, AstNode> make_grammar()
             return node;
         });
     }
+    // suffix_call reuses the existing g["args"] rule directly (it yields
+    // Call [from args_paren, func=∅] | TableCtor | StrLit). The prefixexp fold
+    // discriminates these, so no separate rule is needed: the suffix-loop
+    // alternation is suffix_field | suffix_index | args | suffix_method.
+
+    // The suffix loop itself: primary { suffix }.
+    //
+    // The alternation of named rules collapses to a uniform AstNode, so the
+    // repetition folds to std::vector<AstNode> (one element per suffix). The
+    // action is a left-fold that wraps the accumulator into each suffix node,
+    // producing left-associative nesting:
+    //   a.b.c    → Field(c, Field(b, Name(a)))
+    //   t[1][2]  → Index([2], Index([1], Name(t)))
+    //   f()()    → Call(Call(Name(f)))
+    //   o:m(42)  → MethodCall(Name(o), :m, [42])
     {
-        // functioncall ::= (call_plain | call_method) { args | ':' Name args }.
-        // Each postfix wraps the running result into another call, handling
-        // chained calls like f()()() without seed-grow growth (flat repetition
-        // in the body — functioncall's producer stamps the sequence node).
-        // Postfix results: args_paren → Call; tableconstructor/literal_string
-        // → wrapped in Call by this action; ':Name args' → MethodCall.
-        auto h = (g["functioncall"] =
-                      (g["call_plain"] | g["call_method"]) >>
-                      *(g["args"] | g["call_method_tail"]));
+        auto h = (g["prefixexp"] =
+                      g["primary"] >>
+                      *(g["suffix_field"] | g["suffix_index"] | g["args"] | g["suffix_method"]));
         h.set_action([bstart, bend](Ctx& c, Span sp, AstNode first,
                                      std::vector<AstNode> rest) -> AstNode {
             AstNode acc = std::move(first);
             for (auto& r : rest) {
-                if (holds<Call>(r)) {
-                    // args_paren → existing Call, append func
-                    get<Call>(r).func = Box{std::move(acc)};
+                if (holds<Field>(r)) {
+                    get<Field>(r).obj = Box{std::move(acc)};
+                    acc = std::move(r);
+                } else if (holds<Index>(r)) {
+                    get<Index>(r).obj = Box{std::move(acc)};
                     acc = std::move(r);
                 } else if (holds<MethodCall>(r)) {
-                    // ':Name args' → existing MethodCall, append obj
                     get<MethodCall>(r).obj = Box{std::move(acc)};
                     acc = std::move(r);
+                } else if (holds<Call>(r)) {
+                    // args_paren → existing Call (func=∅), fill func, keep args.
+                    get<Call>(r).func = Box{std::move(acc)};
+                    acc = std::move(r);
                 } else {
-                    // tableconstructor or literal_string → wrap in Call
+                    // tableconstructor or literal_string (from g["args"]) → the
+                    // whole value becomes the single arg of a fresh Call whose
+                    // func is the accumulator. Span taken from the loop, mirroring
+                    // the prior functioncall wrap branch.
                     Call node;
                     node.func = Box{std::move(acc)};
                     node.args.emplace_back(Box{std::move(r)});
@@ -450,41 +438,6 @@ inline peg::Grammar<Token, AstNode> make_grammar()
             }
             return acc;
         });
-    }
-
-    // prefixexp ::= var | functioncall | '(' exp ')'.
-    {
-        auto h = (g["prefixexp_parens"] = tok_char('(') >> g["exp"] >> tok_char(')'));
-        h.set_action([bstart, bend](Ctx& c, Span sp, AstNode e) -> AstNode {
-            Paren node;
-            node.exp = Box{std::move(e)};
-            node.start = bstart(c, sp);
-            node.end = bend(c, sp);
-            return node;
-        });
-    }
-    {
-        // prefixexp ::= var | functioncall | '(' exp ')'.
-        //
-        // ORDERING: var MUST precede functioncall here. This is the OPPOSITE of
-        // what peglib's lr_token_triangle_test documents as "correct", and the
-        // reason is empirical, not theoretical: with functioncall-first, the
-        // grow-loop plants a zero-width functioncall seed and every input
-        // (including a.b, t[1], and bare calls) fails to grow — consumed==0
-        // across the board (verified with the parser_probe harness). The
-        // peglib test's triangle differs from yueshi's real grammar in two
-        // load-bearing ways: (1) its `exp = prefixexp | digit` is flat, while
-        // yueshi wraps prefixexp in a full precedence ladder (exp → or_exp →
-        // … → unop_exp → pow_exp → simple_exp → prefixexp); (2) it carries no
-        // set_action on functioncall/var, while yueshi does. Either difference
-        // (most likely the precedence ladder re-entering the LR head) breaks
-        // functioncall-first growth in the real grammar. With var-first the
-        // seed grows correctly for all of a, a.b, a.b.c, t[1], f(), f(1,2,3),
-        // o:m(42), f()() (parser_probe: consumed == size-1 in every case).
-        // functioncall is instead reached directly from stat_call / simple_exp,
-        // so it never needs to grow through prefixexp.
-        auto h = (g["prefixexp"] = g["var"] | g["functioncall"] | g["prefixexp_parens"]);
-        h.set_action([](Ctx&, Span, AstNode n) -> AstNode { return n; });
     }
 
     // =======================================================================
@@ -906,9 +859,11 @@ inline peg::Grammar<Token, AstNode> make_grammar()
     // Multi-target assignment needs varlist = var {',' var}; single-target is
     // var '=' explist. A bare var/functioncall with no '=' is a call statement.
     {
-        // varlist '=' explist (≥2 targets).
+        // varlist '=' explist (≥2 targets). Each target is a prefixexp that
+        // must be an lvalue (var form); the grammar accepts any suffixexp and
+        // lvalue-ness is enforced later (matches reference Lua's structure).
         auto h = (g["stat_assign"] =
-                      g["var"] >> +(tok_char(',') >> g["var"]) >> tok_char('=') >> g["explist"]);
+                      g["prefixexp"] >> +(tok_char(',') >> g["prefixexp"]) >> tok_char('=') >> g["explist"]);
         h.set_action([bstart, bend](Ctx& c, Span sp, AstNode first, std::vector<AstNode> more,
                                     AstNode values) -> AstNode {
             Assign a;
@@ -921,8 +876,8 @@ inline peg::Grammar<Token, AstNode> make_grammar()
         });
     }
     {
-        // Single-target assignment: var '=' explist.
-        auto h = (g["stat_assign1"] = g["var"] >> tok_char('=') >> g["explist"]);
+        // Single-target assignment: prefixexp '=' explist.
+        auto h = (g["stat_assign1"] = g["prefixexp"] >> tok_char('=') >> g["explist"]);
         h.set_action([bstart, bend](Ctx& c, Span sp, AstNode target, AstNode values) -> AstNode {
             Assign a;
             a.targets.emplace_back(Box{std::move(target)});
@@ -933,8 +888,14 @@ inline peg::Grammar<Token, AstNode> make_grammar()
         });
     }
     {
-        // functioncall as a statement.
-        auto h = (g["stat_call"] = g["functioncall"]);
+        // A function call used as a statement (§9: stat ::= functioncall).
+        // Reaches here only when the prefixexp had no trailing '=' (the
+        // assignment rules above are tried first in the stat alternation and
+        // consume any '=' themselves). The full suffixexp is parsed; a real
+        // Lua compiler would reject a non-call result here (e.g. a bare `a.b`
+        // statement), but that lvalue-vs-call validation is deferred to a
+        // later pass — the parse succeeds and the node is wrapped in CallStat.
+        auto h = (g["stat_call"] = g["prefixexp"]);
         h.set_action([bstart, bend](Ctx& c, Span sp, AstNode call) -> AstNode {
             CallStat cs;
             cs.call = Box{std::move(call)};
@@ -995,14 +956,12 @@ inline peg::Grammar<Token, AstNode> make_grammar()
     // =======================================================================
     // chunk ::= block   (§9 — verbatim. NO explicit EOS in the grammar.)
     //
-    // The EOS sentinel exists in the token stream but is NOT referenced here.
-    // peglib's left-recursion seed-grow converges only when a left-recursive
-    // rule is reached without an intervening sequence at the start position:
-    // a `chunk = block EOS` sequence wrapper pins the match end and prevents
-    // the seed from growing through the var/functioncall/prefixexp triangle
-    // (verified empirically — the alias wrapper `chunk = block` does NOT have
-    // this problem). Since the EBNF itself is `chunk ::= block` (EOS is not a
-    // grammar symbol), we keep it verbatim and check full consumption in
+    // The EOS sentinel exists in the token stream but is NOT referenced here:
+    // a `chunk = block EOS` sequence would pin the match end, and since the
+    // grammar now has NO left-recursive rules at all (the prefixexp triangle
+    // was replaced by a suffix loop), the only reason to avoid the EOS pin is
+    // cleanliness. The EBNF itself is `chunk ::= block` (EOS is not a grammar
+    // symbol), so we keep it verbatim and check full consumption in
     // Parser::parse() instead.
     // =======================================================================
     {
