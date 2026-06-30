@@ -11,10 +11,11 @@ Lua 5.4 lexical syntax (numerals incl. hex floats, escape decoding,
 long-bracket strings/comments, all operators and keywords) with peglib-backed
 error diagnostics. The **parser** produces a typed 38-node AST (14-level
 precedence ladder, suffix-loop `prefixexp`, S-expression printer) and passes
-**34/34** structural unit tests plus the **official Lua 5.4.8 test suite as a
-corpus** (33/33 clean parses, with a known-failure allowlist as a regression
-guard). The **evaluator** (tree-walking interpreter) is the next milestone.
-See [TODO.md](TODO.md) for the full roadmap.
+**56/56** structural unit tests (1 534 assertions) plus the **official Lua
+5.4.8 test suite as a corpus** (33/33 clean parses, with a known-failure
+allowlist as a regression guard). Both gates are green under ASan + UBSan
+with leak detection. The **evaluator** (tree-walking interpreter) is the next
+milestone. See [TODO.md](TODO.md) for the full roadmap.
 
 ## Architecture
 
@@ -49,7 +50,9 @@ src/
 test/
   test.cpp              Unit tests (doctest)
   lex_correctness.cpp   Lexer correctness / regression suite
-  parser_test.cpp       Parser structural unit tests
+  parser_test.cpp       Parser structural unit tests (precedence, statements)
+  parser_structure.cpp  Structural navigation tests over the typed AST
+  ast_check.h           Header-only typed AST accessors (used by the above)
   parser_corpus.cpp     Official-suite parser corpus acceptance
   corpus/lua-5.4.8-tests/  Lua 5.4.8 official test suite (checked in)
   test.lua              Test Lua source

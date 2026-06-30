@@ -21,7 +21,8 @@ yueshi is a Lua 5.4 interpreter built on
 - Eager `Tokenizer::tokenize()` returning `std::vector<Token>` (with trailing `TK_EOS`)
 - CI: GCC 15, Clang 22, MSVC v145, plus a GCC 15 ASan+UBSan Debug gate
 - Parser: 38-node `std::variant` AST, 14-level precedence ladder, suffix-loop
-  `prefixexp` (no left recursion), `ASTPrinter` S-expression output, parser_test 34/34
+  `prefixexp` (no left recursion), `ASTPrinter` S-expression output, parser_test 56/56
+  (1 534 assertions) — green under ASan + UBSan (leak-checked)
 - Lexer gaps closed via the official suite: shebang first-line, `\ddd` 1–3 digits,
   raw-newline rejection in short strings, escaped `\\` / `\z` / line-continuation,
   hex floats with no integer part (`0x.0p-3`)

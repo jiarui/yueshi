@@ -33,6 +33,7 @@ add_test(NAME yueshi_lua_lex_test COMMAND yueshi_lua_lex_test)
 # code lives in headers; only parser.cpp + lex.cpp compile in here.
 add_executable(yueshi_lua_parser_test
     parser_test.cpp
+    parser_structure.cpp
     ../src/lua/parser.cpp
     ../src/lua/lex.cpp)
 target_link_libraries(yueshi_lua_parser_test PRIVATE peglib yueshi_test_main)
