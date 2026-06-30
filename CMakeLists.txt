@@ -13,12 +13,12 @@ option(YUESHI_ENABLE_SANITIZERS "Enable ASan + UBSan (GCC/Clang Debug builds)" O
 add_executable(yueshi)
 target_link_libraries(yueshi PRIVATE peglib)
 target_include_directories(yueshi PUBLIC include)
-target_sources(yueshi PRIVATE src/yueshi.cpp src/ysState.cpp src/lua/lex.cpp)
+target_sources(yueshi PRIVATE src/yueshi.cpp src/ysState.cpp src/lua/lex.cpp src/lua/parser.cpp)
 
 add_executable(yueshic)
 target_link_libraries(yueshic PRIVATE peglib)
 target_include_directories(yueshic PUBLIC include)
-target_sources(yueshic PRIVATE src/yueshic.cpp src/ysState.cpp src/lua/lex.cpp)
+target_sources(yueshic PRIVATE src/yueshic.cpp src/ysState.cpp src/lua/lex.cpp src/lua/parser.cpp)
 
 # Apply sanitizer flags to every target that links yueshi's translation units.
 # MSVC's ASan story is separate and not wired here; this option targets GCC/Clang
