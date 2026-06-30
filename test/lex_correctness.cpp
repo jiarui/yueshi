@@ -268,3 +268,93 @@ TEST_CASE("source_ranges populated") {
     CHECK(toks[1].end == 5);
     CHECK(toks[2].id == id_of(TokenID::TK_EOS));
 }
+
+// ---------------------------------------------------------------------------
+// Decimal escape \ddd: 1 to 3 digits (Lua 5.4 §3.1). Previously the grammar
+// required EXACTLY 3 digits, so '\0' (1 digit) and '\65' (2 digits) failed.
+// Surfaced by the official corpus (api.lua's "alo\0\0a").
+// ---------------------------------------------------------------------------
+TEST_CASE("decimal_escape ddd 1-to-3 digits") {
+    SUBCASE("single digit \\0") {
+        // C++ source "\"\\0\"" is the Lua source "\0" (4 bytes: " \ 0 ").
+        auto toks = lex_ok("\"\\0\"");
+        REQUIRE(toks.size() == 2);
+        CHECK(toks[0].id == id_of(TokenID::TK_STRING));
+        CHECK(std::get<2>(toks[0].info) == std::string{'\0'});
+    }
+    SUBCASE("two digit \\65") {
+        auto toks = lex_ok("\"\\65\"");
+        REQUIRE(toks.size() == 2);
+        CHECK(std::get<2>(toks[0].info) == std::string{'A'}); // ASCII 65
+    }
+    SUBCASE("three digit \\065 stops at three") {
+        // \065 is 'A'; the following "1" is a separate token (numeral).
+        auto toks = lex_ok("\"\\065\"1");
+        REQUIRE(toks.size() == 3);
+        CHECK(std::get<2>(toks[0].info) == std::string{'A'});
+        CHECK(toks[1].id == id_of(TokenID::TK_INT));
+    }
+    SUBCASE("corpus case alo\\0\\0a") {
+        // Exact input from api.lua:364 — "alo\0\0a" (backslash-zero twice).
+        auto toks = lex_ok("\"alo\\0\\0a\"");
+        REQUIRE(toks.size() == 2);
+        CHECK(toks[0].id == id_of(TokenID::TK_STRING));
+        std::string expected{'a','l','o','\0','\0','a'};
+        CHECK(std::get<2>(toks[0].info) == expected);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Short strings must not span a raw newline (Lua 5.4 §3.1). Previously the
+// no-escape predicate accepted any char but the quote, so an unterminated
+// string silently consumed newlines and kept scanning — the official corpus
+// exposed this when a stray quote appeared on a later line.
+// ---------------------------------------------------------------------------
+TEST_CASE("short_string rejects raw newline") {
+    // "abc<newline>def" is a lex error, not a two-line string.
+    auto toks = Tokenizer{"\"abc\ndef\""}.tokenize();
+    bool found_err = false;
+    for (const auto& tk : toks) if (tk.id == -1) { found_err = true; break; }
+    CHECK(found_err);
+    // An escaped newline (backslash-newline continuation) IS allowed.
+    auto ok = lex_ok("\"abc\\\ndef\"");
+    REQUIRE(ok.size() == 2);
+    CHECK(ok[0].id == id_of(TokenID::TK_STRING));
+}
+
+// ---------------------------------------------------------------------------
+// Backslash escapes surfaced by the official corpus: \\ (escaped backslash)
+// and \z (whitespace span, including newlines). Both were missing from the
+// grammar's escape set.
+// ---------------------------------------------------------------------------
+TEST_CASE("backslash and z escapes") {
+    SUBCASE("escaped backslash \\\\") {
+        // Lua source "a\\b" -> decoded "a\b".
+        auto toks = lex_ok("\"a\\\\b\"");
+        REQUIRE(toks.size() == 2);
+        CHECK(std::get<2>(toks[0].info) == std::string{'a', '\\', 'b'});
+    }
+    SUBCASE("z span skips a newline") {
+        // \z eats whitespace across lines; "a\z\nb" decodes to "ab".
+        auto toks = lex_ok("\"a\\z\nb\"");
+        REQUIRE(toks.size() == 2);
+        CHECK(std::get<2>(toks[0].info) == std::string{'a', 'b'});
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Hex float with no integer part (0x.0p-3) is valid (Lua 5.4 §3.1). The
+// grammar previously required a non-empty integer part after 0x.
+// ---------------------------------------------------------------------------
+TEST_CASE("hex float edge forms") {
+    SUBCASE("0x.0p-3 lexes as one float") {
+        auto toks = lex_ok("0x.0p-3");
+        REQUIRE(toks.size() == 2);
+        CHECK(toks[0].id == id_of(TokenID::TK_FLT));
+    }
+    SUBCASE("0x0p12 still lexes as one float") {
+        auto toks = lex_ok("0x0p12");
+        REQUIRE(toks.size() == 2);
+        CHECK(toks[0].id == id_of(TokenID::TK_FLT));
+    }
+}

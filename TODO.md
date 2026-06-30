@@ -20,6 +20,14 @@ yueshi is a Lua 5.4 interpreter built on
 - Token source ranges (`start` / `end` byte offsets)
 - Eager `Tokenizer::tokenize()` returning `std::vector<Token>` (with trailing `TK_EOS`)
 - CI: GCC 15, Clang 22, MSVC v145, plus a GCC 15 ASan+UBSan Debug gate
+- Parser: 38-node `std::variant` AST, 14-level precedence ladder, suffix-loop
+  `prefixexp` (no left recursion), `ASTPrinter` S-expression output, parser_test 34/34
+- Lexer gaps closed via the official suite: shebang first-line, `\ddd` 1–3 digits,
+  raw-newline rejection in short strings, escaped `\\` / `\z` / line-continuation,
+  hex floats with no integer part (`0x.0p-3`)
+- Official Lua 5.4.8 test suite integrated as a parser corpus
+  (`test/parser_corpus.cpp` over `test/corpus/lua-5.4.8-tests/`): 33/33 clean,
+  with a known-failure allowlist as the regression guard
 
 ## Phase 1 — Lexer (double-pass)
 
@@ -34,20 +42,30 @@ yueshi is a Lua 5.4 interpreter built on
       Phase 2; `tokenize()` + peglib `Context<Token>` cover the parser's needs
 - [x] Keyword vs name disambiguation via `cut`
 - [ ] Comprehensive lexer test suite (Lua 5.4 reference lexer corpus) —
-      correctness/regression cases are in `test/lex_correctness.cpp`; full
-      corpus integration is pending
-- [ ] Minor: bare `\r` line endings (H8.2); reject raw newlines inside short
-      strings (H8.3)
+      correctness/regression cases are in `test/lex_correctness.cpp`; the
+      official suite now lexes clean as part of the parser corpus
+      (`test/parser_corpus.cpp`, 33/33), which surfaced and fixed several
+      real lexer gaps (shebang, `\ddd` 1–3 digits, raw newlines in short
+      strings, `\\` / `\z` / line-continuation escapes, hex floats with no
+      integer part). A dedicated lexer-only corpus run is still pending.
+- [x] Minor: reject raw newlines inside short strings (H8.3) — short-string
+      scan now excludes `\n`/`\r`, so an unterminated string errors at its real
+      location instead of running on to a later quote
+- [ ] Minor: bare `\r` line endings (H8.2)
 
 ## Phase 2 — Parser → Typed AST
 
-- [ ] `AST.h` with `std::variant`-based strong node types
-- [ ] **Explicit precedence layering** (14 priority levels, 2 associativities)
+- [x] `AST.h` with `std::variant`-based strong node types
+- [x] **Explicit precedence layering** (14 priority levels, 2 associativities)
       — NOT pure left recursion (PEG left-recursion is precedence-unaware;
       see Lua 5.4 operator precedence table)
-- [ ] Semantic actions build AST nodes from the value stack
-- [ ] `ASTPrinter` (S-expression output) for debugging
-- [ ] Parse Lua 5.4 official test suite ≥ 95%
+- [x] Semantic actions build AST nodes from the value stack
+- [x] `ASTPrinter` (S-expression output) for debugging
+- [x] Parse the Lua 5.4 official test suite — corpus checked in under
+      `test/corpus/lua-5.4.8-tests/` and driven by `test/parser_corpus.cpp`,
+      which lex+parses every `.lua` and asserts clean parses via an explicit
+      known-failure allowlist (no fixed %-gate; the point is to expose the
+      parser's real state and catch regressions). Currently 33/33 clean.
 
 ## Phase 3 — Validation
 

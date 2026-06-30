@@ -53,19 +53,54 @@ inline peg::Grammar<> make_grammar()
     auto fractional = (*digit >> '.' >> +digit) | (+digit >> '.' >> *digit);
     auto decimal = +digit;
     auto signed_decimal = -(g.terminal('+') | '-') >> decimal;
-    auto hexdecimal = g.terminal('0') >> (g.terminal('x') | 'X') >> +xdigit >>
-                      -('.' >> +xdigit) >> -((g.terminal('p') | 'P') >> +signed_decimal);
+    // Hex numeral (Lua 5.4 §3.1). An integer part OR a fraction part must be
+    // present, but EITHER may be empty: 0x.0p-3 (no integer part) is just as
+    // valid as 0x1p0 or 0xFF. The previous form (+xdigit >> -('.' >> +xdigit))
+    // forced the integer part to be non-empty, so 0x.0p-3 fell through and
+    // mis-lexed. Hex float needs a p-exponent; a bare integer takes no part.
+    auto hex_int_or_frac =
+        (+xdigit >> -('.' >> *xdigit)) | ('.' >> +xdigit);
+    auto hexdecimal = g.terminal('0') >> (g.terminal('x') | 'X') >>
+                      hex_int_or_frac >>
+                      -((g.terminal('p') | 'P') >> +signed_decimal);
 
     auto common_escape_code =
         g.terminal('a') | 'b' | 'f' | 'n' | 'r' | 't' | 'v' |
-        (g.terminal('\\') >> '\\' >> 'n') | ('z' >> WS) | (3 * digit) |
+        // Escaped backslash (\\). This was missing entirely; the previous
+        // (terminal('\\') >> '\\' >> 'n') tried to cover it but matched the
+        // literal three characters \\n instead and never accepted a lone \\.
+        g.terminal('\\') |
+        // Line continuation: backslash followed by a real newline (LF or
+        // CRLF). The result is the empty string; the grammar just needs to
+        // consume it so the newline is not treated as an unescaped line break
+        // (which short strings reject).
+        linebreak |
+        // \z skips all following whitespace INCLUDING newlines (Lua 5.4 §3.1).
+        // The lexer's WS excludes newlines (inter-token whitespace never spans
+        // lines), so \z uses its own newline-inclusive whitespace class.
+        ('z' >> +g.terminal(std::set({' ', '\f', '\t', '\v', '\n', '\r'}))) |
+        // Decimal escape \ddd: 1 to 3 digits (Lua 5.4 §3.1). The previous
+        // "(3 * digit)" required EXACTLY 3 digits, so '\0' or '\65' (1-2
+        // digits) failed lexing. Greedy 1-then-optional-2 matches the same
+        // set as "up to 3" because PEG always takes the optional digits when
+        // available, capping at 3 total.
+        (digit >> -digit >> -digit) |
         (2 * xdigit) | (g.terminal('u') >> '{' >> *xdigit >> '}');
     auto single_escape_code = g.terminal('\\') >> (common_escape_code | '\'');
     // Inside a double-quoted string the escapable quote is ", not '. (The
     // previous code allowed \' here, which made "a\"b" un-lexable.)
     auto double_escape_code = g.terminal('\\') >> (common_escape_code | '"');
-    auto single_no_escape_code = g.terminal([](char c) { return c != '\''; });
-    auto double_no_escape_code = g.terminal([](char c) { return c != '"'; });
+    // A short string must NOT contain a raw newline (Lua 5.4 §3.1: a newline
+    // may only appear escaped). The previous predicate accepted any char but
+    // the quote, so an unterminated string silently swallowed newlines and
+    // grabbed text far past its real end — the official corpus exposed this
+    // (e.g. a missing close quote let the scan run on to the next '"' on a
+    // later line). Rejecting \n and \r here makes such input a lex error at
+    // the right place instead.
+    auto single_no_escape_code =
+        g.terminal([](char c) { return c != '\'' && c != '\n' && c != '\r'; });
+    auto double_no_escape_code =
+        g.terminal([](char c) { return c != '"' && c != '\n' && c != '\r'; });
 
     g["name"] = name_start >> *name_cont;
 

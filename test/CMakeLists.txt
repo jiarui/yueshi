@@ -41,3 +41,20 @@ target_include_directories(yueshi_lua_parser_test PRIVATE
     ${CMAKE_SOURCE_DIR}/include)
 yueshi_test_enable_sanitizers(yueshi_lua_parser_test)
 add_test(NAME yueshi_lua_parser_test COMMAND yueshi_lua_parser_test)
+
+# Parser corpus acceptance: run the parser over the official Lua 5.4.8 test
+# suite and assert clean parses (with an explicit known-failure allowlist).
+# The corpus is checked in under test/corpus/lua-5.4.8-tests/; the path is
+# baked in via YUESHI_CORPUS_DIR so the test does not depend on CWD.
+add_executable(yueshi_lua_parser_corpus
+    parser_corpus.cpp
+    ../src/lua/parser.cpp
+    ../src/lua/lex.cpp)
+target_link_libraries(yueshi_lua_parser_corpus PRIVATE peglib yueshi_test_main)
+target_include_directories(yueshi_lua_parser_corpus PRIVATE
+    ${doctest_include_dir}
+    ${CMAKE_SOURCE_DIR}/include)
+target_compile_definitions(yueshi_lua_parser_corpus PRIVATE
+    YUESHI_CORPUS_DIR="${CMAKE_SOURCE_DIR}/test/corpus/lua-5.4.8-tests")
+yueshi_test_enable_sanitizers(yueshi_lua_parser_corpus)
+add_test(NAME yueshi_lua_parser_corpus COMMAND yueshi_lua_parser_corpus)

@@ -6,11 +6,15 @@ with packrat memoization, left-recursion support, and a cut operator.
 
 ## Status
 
-Early development. The lexer is feature-complete (full Lua 5.4 lexical
-syntax: numerals incl. hex floats, escape decoding, long-bracket
-strings/comments, all operators and keywords) with peglib-backed error
-diagnostics; the parser, AST, and evaluator are planned. See
-[TODO.md](TODO.md) for the full roadmap.
+The **lexer** and **parser** are feature-complete. The lexer covers full
+Lua 5.4 lexical syntax (numerals incl. hex floats, escape decoding,
+long-bracket strings/comments, all operators and keywords) with peglib-backed
+error diagnostics. The **parser** produces a typed 38-node AST (14-level
+precedence ladder, suffix-loop `prefixexp`, S-expression printer) and passes
+**34/34** structural unit tests plus the **official Lua 5.4.8 test suite as a
+corpus** (33/33 clean parses, with a known-failure allowlist as a regression
+guard). The **evaluator** (tree-walking interpreter) is the next milestone.
+See [TODO.md](TODO.md) for the full roadmap.
 
 ## Architecture
 
@@ -39,12 +43,15 @@ include/
 src/
   lua/
     lex.cpp        Token string maps, operator<<
-    parser.cpp     Parser implementation (skeleton)
+    parser.cpp     Parser implementation
   yueshi.cpp       Main entry point
   yueshic.cpp      Compiler CLI
 test/
   test.cpp              Unit tests (doctest)
   lex_correctness.cpp   Lexer correctness / regression suite
+  parser_test.cpp       Parser structural unit tests
+  parser_corpus.cpp     Official-suite parser corpus acceptance
+  corpus/lua-5.4.8-tests/  Lua 5.4.8 official test suite (checked in)
   test.lua              Test Lua source
 ```
 

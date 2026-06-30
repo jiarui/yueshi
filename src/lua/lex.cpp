@@ -290,6 +290,19 @@ Tokenizer::Tokenizer(std::string input)
 std::vector<Token> Tokenizer::tokenize()
 {
     std::vector<Token> out;
+
+    // Lua 5.4 §3.1: if the first line of a chunk begins with '#', that whole
+    // line is ignored (the Unix shebang / "#!" convention, but the rule is
+    // broader — any '#' as the file's very first character). The grammar is
+    // stateless and cannot express "first line only", so handle it here before
+    // the main scan. No diagnostic, no token — the line is simply consumed.
+    if (m_context.input_size() > 0 && m_context.at(0) == '#') {
+        std::size_t i = 0;
+        while (i < m_context.input_size() && m_context.at(i) != '\n') ++i;
+        if (i < m_context.input_size()) ++i; // consume the newline, if present
+        m_context.reset(i);
+    }
+
     while (!m_context.ended()) {
         auto tok_start = m_context.mark();
         m_token_buf = Token{}; // clear scratch: id == -1, start/end == 0
