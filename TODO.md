@@ -84,6 +84,31 @@ yueshi is a Lua 5.4 interpreter built on
   gsub with 3 replacement kinds/5.3.3 empty-match rule/exact error strings).
   `pack`/`unpack`/`packsize` stubbed. Tests: evaluator 134/134 (7 412),
   gc 15/15 (53), pattern 20/20 (107) — green under ASan + UBSan.
+- **M3.2-3 `table` + `math` libraries** (combined milestone):
+  - **table** — `insert` (positional + append, with the exact `position out
+    of bounds` / `number has no integer representation` errors), `remove`
+    (default-last + positional, shifts down), `concat` (with sep + i/j range,
+    exact `invalid value (at index N) in table for 'concat'` error),
+    `pack`/`unpack` (multires round-trip incl. `t.n`), `move` (overlapping-
+    range forward/backward copy, returns dest), `sort` (recursive quicksort
+    with median-of-3 pivot, insertion-sort cutoff at 16, tail-call
+    elimination on the larger partition for O(log n) stack depth; comparator
+    dispatches through the public `Evaluator::call_value` so a Lua comparator's
+    metamethods are honored; totalness check raises `invalid order function
+    for sorting` when `comp(a,b)` and `comp(b,a)` are both true for an
+    adjacent pair).
+  - **math** — constants (`pi`/`huge`/`maxinteger`/`mininteger`); subtype-
+    preserving `abs`/`ceil`/`floor`/`min`/`max` (the chosen value's subtype
+    is preserved, so `math.min(5.0, 3, 8)` returns integer `3`, while
+    `math.min(0.5, 3, 8)` returns float `0.5`); all `<cmath>` wrappers
+    (`exp`/`log`/`sqrt`/`sin`/`cos`/`tan`/`fmod`/`modf`/`pow`); `tointeger`
+    (nil for non-integral floats / non-numbers); `math.type` ("integer"/
+    "float"/nil); `random`/`randomseed` backed by a per-Evaluator
+    xorshift64* PRNG (lazy-created, default seed = 1 for reproducibility —
+    matches reference Lua's seed-reproducibility property, though NOT byte-
+    for-byte the same sequence).
+  - Tests: evaluator 134→159 (+25 cases: 13 table + 12 math, +3 298
+    assertions). All green under ASan + UBSan with leak detection.
 
 ## Phase 1 — Lexer (double-pass)
 
@@ -281,19 +306,13 @@ is independently shippable and adds its own test corpus file(s).
     (`"unfinished capture"`, `"malformed pattern (missing ']')"`, `"missing
     '[' after '%f' in pattern"`, etc.).
   - Unblocks corpus: `pm.lua`, `strings.lua`.
-- **M3.2 `table` library** — `insert`/`remove`/`concat`/`pack`/`unpack`/`move`/
-  `sort`. `sort` dispatches through the existing `call_value` (so it honors a
-  comparator's metamethods for free). `pack`/`unpack` round out multires
-  handling. Unblocks corpus: `sort.lua`, `tpack.lua`.
-- **M3.3 `math` library** — constants (`pi`/`huge`/`maxinteger`/`mininteger`)
-  + functions (`abs`/`ceil`/`floor`/`exp`/`log`/`pow`/`sqrt`/`sin`/`cos`/`tan`/
-  `min`/`max`/`fmod`/`modf`/`random`/`randomseed`/`tointeger`/`type`). Almost
-  entirely thin wrappers over `<cmath>`; the only subtlety is `random` (state
-  lives in the interpreter). Unblocks corpus: `math.lua`, parts of `literals.lua`.
-  **M3.1 → M3.3 ordering note:** `strings.lua`'s `%a`/`%g`/large-number format
-  tests (~40 assertions) need `math.maxinteger`/`mininteger`/`huge`/`pi` and
-  `math.type`/`tointeger`. Sequence M3.3 immediately after M3.1 so `strings.lua`
-  runs end-to-end; M3.1 alone still unblocks `pm.lua` (~155 assertions).
+- **M3.2.5 `string.pack` / `unpack` / `packsize`** (next) — the isolated
+  ~500-LOC mini-milestone. Currently stubbed in strlib.cpp; tpack.lua's ~150
+  self-contained assertions all gate on it. Endian/align/overflow and the
+  exact error strings (`"out of limits"`, `"invalid format option 'r'"`,
+  `"16-byte integer"`, etc.) are the bulk of the work. No other lib needs
+  it; can land cleanly between M3.2-3 and the higher-risk M3.5 refactor.
+  Unblocks corpus: `tpack.lua`.
 - **M3.4 `io` + `os` libraries** — needs a **file-handle / userdata** concept
   (a new `LuaValue` tag, or a `Table` with a hidden native pointer slot).
   - `io`: `write`/`read`/`open`/`close`/`lines`, plus `io.stdin`/`io.stdout`/
@@ -302,7 +321,8 @@ is independently shippable and adds its own test corpus file(s).
     existing `__gc` hook once M4 lands).
   - `os`: `time`/`clock`/`date`/`difftime`/`getenv`/`exit`/`execute`/`remove`/
     `rename`. Thin wrappers over POSIX/CRT.
-  - Unblocks corpus: `files.lua`, parts of `all.lua`.
+  - Unblocks corpus: `files.lua`, parts of `all.lua`, the `os.clock` timing
+    loop in `sort.lua`.
 - **M3.5 `_G`/`_ENV` + `load()`/`dofile()` + `require`** — the load-bearing
   piece for the rest of the suite:
   - **`_G`/`_ENV`**: real global-table semantics. Currently globals live in

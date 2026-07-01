@@ -8,6 +8,8 @@
 #include "lua/ast.h"
 #include "lua/numops.h"
 #include "lua/strlib.h"
+#include "lua/tablib.h"
+#include "lua/mathlib.h"
 
 namespace ys
 {
@@ -374,6 +376,9 @@ namespace ys
 
             // Install the string library + per-type string metatable (M3.1).
             install_string_lib(*this);
+            // M3.2-3: table + math libraries.
+            install_table_lib(*this);
+            install_math_lib(*this);
         }
 
         // -------------------------------------------------------------------

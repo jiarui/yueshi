@@ -8,6 +8,8 @@
 
 #include "doctest.h"
 
+#include <cmath>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -1600,6 +1602,434 @@ TEST_CASE("evaluator: string interning — short string identity")
     // This is visible via == (which works on string content) and indirectly
     // through format %p (though %p is hard to assert in unit tests).
     CHECK(as_bool(g.run_scalar("local a = 'ab'; local b = 'ab'; return a == b")) == true);
+}
+
+// =====================================================================
+// M3.2: table library
+// =====================================================================
+
+TEST_CASE("evaluator: table.insert — append form")
+{
+    EvalRig g;
+    g.run("local t = {}; table.insert(t, 10); table.insert(t, 20); "
+          "table.insert(t, 30)");
+    CHECK(as_int(g.run_scalar("local t = {10,20,30}; return #t")) == 3);
+    // verify insert actually appends in order
+    CHECK(as_str(g.run_scalar(
+        "local t = {}; "
+        "table.insert(t, 'a'); table.insert(t, 'b'); table.insert(t, 'c'); "
+        "return t[2]")) == "b");
+}
+
+TEST_CASE("evaluator: table.insert — positional form shifts")
+{
+    EvalRig g;
+    CHECK(as_str(g.run_scalar(
+        "local t = {'a','b','d'}; "
+        "table.insert(t, 3, 'c'); "
+        "return table.concat(t)")) == "abcd");
+    CHECK(as_str(g.run_scalar(
+        "local t = {'b','c','d'}; "
+        "table.insert(t, 1, 'a'); "
+        "return table.concat(t)")) == "abcd");
+    // insert at position n+1 is equivalent to append
+    CHECK(as_str(g.run_scalar(
+        "local t = {'a','b','c'}; "
+        "table.insert(t, 4, 'd'); "
+        "return table.concat(t)")) == "abcd");
+}
+
+TEST_CASE("evaluator: table.remove — default + positional")
+{
+    EvalRig g;
+    // Default: remove last
+    CHECK(as_str(g.run_scalar(
+        "local t = {'a','b','c'}; "
+        "local r = table.remove(t); "
+        "return r .. '|' .. table.concat(t)")) == "c|ab");
+    // Positional: shift down
+    CHECK(as_str(g.run_scalar(
+        "local t = {'a','b','c'}; "
+        "local r = table.remove(t, 1); "
+        "return r .. '|' .. table.concat(t)")) == "a|bc");
+    // Remove middle
+    CHECK(as_str(g.run_scalar(
+        "local t = {'a','b','c','d'}; "
+        "local r = table.remove(t, 2); "
+        "return r .. '|' .. table.concat(t)")) == "b|acd");
+    // Remove from empty table returns nothing
+    CHECK(g.run("local t = {}; return table.remove(t)").empty());
+}
+
+TEST_CASE("evaluator: table.concat — basic + separator")
+{
+    EvalRig g;
+    CHECK(as_str(g.run_scalar("return table.concat({1,2,3})")) == "123");
+    CHECK(as_str(g.run_scalar("return table.concat({1,2,3}, ',')")) == "1,2,3");
+    CHECK(as_str(g.run_scalar(
+        "return table.concat({'a','b','c'}, '-')")) == "a-b-c");
+    // i/j range
+    CHECK(as_str(g.run_scalar(
+        "return table.concat({1,2,3,4,5}, ',', 2, 4)")) == "2,3,4");
+    // Empty range
+    CHECK(as_str(g.run_scalar(
+        "return table.concat({1,2,3}, ',', 5, 1)")) == "");
+    // Numbers (float) render via number_to_string
+    CHECK(as_str(g.run_scalar(
+        "return table.concat({1.5, 2.5}, '|')")) == "1.5|2.5");
+}
+
+TEST_CASE("evaluator: table.concat — error cases")
+{
+    EvalRig g;
+    // Non-string/number element
+    auto r1 = g.run(
+        "local t = {1, 2, {}}; "
+        "local ok, err = pcall(table.concat, t); "
+        "return ok, err");
+    REQUIRE(r1.size() == 2);
+    CHECK(as_bool(r1[0]) == false);
+    CHECK(r1[1].as_str()->data.find("invalid value (at index 3)") !=
+          std::string::npos);
+}
+
+TEST_CASE("evaluator: table.pack / table.unpack round-trip")
+{
+    EvalRig g;
+    // pack preserves arity via .n
+    auto r = g.run("return table.pack(10, 20, 30)");
+    REQUIRE(r.size() == 1);
+    REQUIRE(r[0].is_table());
+    // .n is set to the count
+    LuaKey nk; nk.k = LuaKey::K::Str; nk.s = "n";
+    LuaValue n = r[0].as_table()->hash[nk];
+    REQUIRE(n.is_int());
+    CHECK(n.as_int() == 3);
+    // elements 1..3
+    LuaKey k1; k1.k = LuaKey::K::Int; k1.i = 1;
+    CHECK(r[0].as_table()->hash[k1].as_int() == 10);
+
+    // unpack round-trips
+    CHECK(as_int(g.run_scalar(
+        "local t = table.pack(10, 20, 30); "
+        "local a, b, c = table.unpack(t); "
+        "return a + b + c")) == 60);
+    // unpack with range
+    CHECK(as_int(g.run_scalar(
+        "local t = {10, 20, 30, 40}; "
+        "local a, b = table.unpack(t, 2, 3); "
+        "return a + b")) == 50);
+    // pack captures trailing nils (multires)
+    CHECK(as_int(g.run_scalar(
+        "local function f() return 1, nil, 3 end; "
+        "local t = table.pack(f()); "
+        "return t.n")) == 3);
+}
+
+TEST_CASE("evaluator: table.move — basic + overlap")
+{
+    EvalRig g;
+    // Basic move within same table: copy elements 1..3 to positions 4..6
+    // (the table grows from 5 to 6 elements).
+    CHECK(as_str(g.run_scalar(
+        "local t = {1,2,3,4,5}; "
+        "table.move(t, 1, 3, 4); "
+        "return table.concat(t, ',')")) == "1,2,3,1,2,3");
+    // Move to a different table
+    CHECK(as_str(g.run_scalar(
+        "local a = {10,20,30}; local b = {}; "
+        "table.move(a, 1, 3, 1, b); "
+        "return table.concat(b, ',')")) == "10,20,30");
+    // Overlapping forward (dest > source): copy 2..4 to 3..5
+    CHECK(as_str(g.run_scalar(
+        "local t = {1,2,3,4,5}; "
+        "table.move(t, 2, 4, 3); "
+        "return table.concat(t, ',')")) == "1,2,2,3,4");
+    // Overlapping backward (dest < source): copy 2..4 to 1..3
+    CHECK(as_str(g.run_scalar(
+        "local t = {1,2,3,4,5}; "
+        "table.move(t, 2, 4, 1); "
+        "return table.concat(t, ',')")) == "2,3,4,4,5");
+    // Returns destination table
+    CHECK(as_bool(g.run_scalar(
+        "local a = {}; local b = {}; "
+        "return table.move(a, 1, 0, 1, b) == b")) == true);
+}
+
+TEST_CASE("evaluator: table.sort — numeric default")
+{
+    EvalRig g;
+    CHECK(as_str(g.run_scalar(
+        "local t = {5, 3, 1, 4, 2}; "
+        "table.sort(t); "
+        "return table.concat(t, ',')")) == "1,2,3,4,5");
+    // Reverse with comparator
+    CHECK(as_str(g.run_scalar(
+        "local t = {5, 3, 1, 4, 2}; "
+        "table.sort(t, function(a,b) return a > b end); "
+        "return table.concat(t, ',')")) == "5,4,3,2,1");
+    // Already sorted
+    CHECK(as_str(g.run_scalar(
+        "local t = {1,2,3,4,5}; "
+        "table.sort(t); "
+        "return table.concat(t, ',')")) == "1,2,3,4,5");
+    // Reverse-sorted input (worst case for naive quicksort)
+    CHECK(as_str(g.run_scalar(
+        "local t = {}; "
+        "for i = 100, 1, -1 do t[#t+1] = i end; "
+        "table.sort(t); "
+        "return t[1] .. ',' .. t[100] .. ',' .. t[50]")) == "1,100,50");
+}
+
+TEST_CASE("evaluator: table.sort — strings + custom comparator")
+{
+    EvalRig g;
+    CHECK(as_str(g.run_scalar(
+        "local t = {'banana', 'apple', 'cherry'}; "
+        "table.sort(t); "
+        "return table.concat(t, ',')")) == "apple,banana,cherry");
+    // Sort by length
+    CHECK(as_str(g.run_scalar(
+        "local t = {'aaaa', 'b', 'cc'}; "
+        "table.sort(t, function(a,b) return #a < #b end); "
+        "return table.concat(t, ',')")) == "b,cc,aaaa");
+}
+
+TEST_CASE("evaluator: table.sort — totalness error")
+{
+    EvalRig g;
+    // A comparator that returns true for both orders is non-total; Lua raises.
+    auto r = g.run(
+        "local t = {1, 2}; "
+        "local ok, err = pcall(table.sort, t, function(a,b) return true end); "
+        "return ok, tostring(err)");
+    REQUIRE(r.size() == 2);
+    CHECK(as_bool(r[0]) == false);
+    CHECK(r[1].as_str()->data.find("invalid order function") !=
+          std::string::npos);
+}
+
+TEST_CASE("evaluator: table.sort — empty and singleton")
+{
+    EvalRig g;
+    CHECK(as_str(g.run_scalar(
+        "local t = {}; table.sort(t); return table.concat(t)")) == "");
+    CHECK(as_int(g.run_scalar(
+        "local t = {42}; table.sort(t); return t[1]")) == 42);
+}
+
+// =====================================================================
+// M3.3: math library
+// =====================================================================
+
+TEST_CASE("evaluator: math constants")
+{
+    EvalRig g;
+    CHECK(as_flt(g.run_scalar("return math.pi")) == doctest::Approx(3.14159265358979));
+    CHECK(as_flt(g.run_scalar("return math.huge")) ==
+          std::numeric_limits<double>::infinity());
+    CHECK(as_int(g.run_scalar("return math.maxinteger")) ==
+          std::numeric_limits<long long>::max());
+    CHECK(as_int(g.run_scalar("return math.mininteger")) ==
+          std::numeric_limits<long long>::min());
+}
+
+TEST_CASE("evaluator: math.abs subtype preservation")
+{
+    EvalRig g;
+    CHECK(as_int(g.run_scalar("return math.abs(-5)")) == 5);
+    CHECK(as_int(g.run_scalar("return math.abs(5)")) == 5);
+    CHECK(as_int(g.run_scalar("return math.abs(0)")) == 0);
+    CHECK(as_flt(g.run_scalar("return math.abs(-3.5)")) == 3.5);
+    CHECK(as_flt(g.run_scalar("return math.abs(3.5)")) == 3.5);
+}
+
+TEST_CASE("evaluator: math.ceil/floor — int stays int, float rounds")
+{
+    EvalRig g;
+    // Ints stay ints
+    CHECK(as_int(g.run_scalar("return math.ceil(5)")) == 5);
+    CHECK(as_int(g.run_scalar("return math.floor(5)")) == 5);
+    // Floats round to integer
+    CHECK(as_int(g.run_scalar("return math.ceil(3.2)")) == 4);
+    CHECK(as_int(g.run_scalar("return math.floor(3.8)")) == 3);
+    CHECK(as_int(g.run_scalar("return math.ceil(-3.2)")) == -3);
+    CHECK(as_int(g.run_scalar("return math.floor(-3.8)")) == -4);
+    // Out-of-range floats yield nil
+    CHECK(g.run_scalar("return math.ceil(math.huge * 1000)").is_nil());
+}
+
+TEST_CASE("evaluator: math.exp/log/sqrt/sin/cos/tan")
+{
+    EvalRig g;
+    CHECK(as_flt(g.run_scalar("return math.exp(0)")) == 1.0);
+    CHECK(as_flt(g.run_scalar("return math.exp(1)")) ==
+          doctest::Approx(2.718281828459045));
+    CHECK(as_flt(g.run_scalar("return math.log(math.exp(1))")) ==
+          doctest::Approx(1.0));
+    CHECK(as_flt(g.run_scalar("return math.log(100, 10)")) ==
+          doctest::Approx(2.0));
+    CHECK(as_flt(g.run_scalar("return math.sqrt(16)")) == 4.0);
+    CHECK(as_flt(g.run_scalar("return math.sqrt(2)")) ==
+          doctest::Approx(1.4142135623730951));
+    CHECK(as_flt(g.run_scalar("return math.sin(0)")) == 0.0);
+    CHECK(as_flt(g.run_scalar("return math.cos(0)")) == 1.0);
+    CHECK(as_flt(g.run_scalar("return math.tan(0)")) == 0.0);
+    CHECK(as_flt(g.run_scalar("return math.sin(math.pi / 2)")) ==
+          doctest::Approx(1.0));
+}
+
+TEST_CASE("evaluator: math.fmod subtype preservation")
+{
+    EvalRig g;
+    // int,int -> int
+    CHECK(as_int(g.run_scalar("return math.fmod(7, 3)")) == 1);
+    CHECK(as_int(g.run_scalar("return math.fmod(-7, 3)")) == -1);
+    // float involvement -> float
+    CHECK(as_flt(g.run_scalar("return math.fmod(7.5, 2)")) ==
+          doctest::Approx(1.5));
+    // fmod by 0 with ints: returns NaN (Lua 5.4 behavior)
+    CHECK(std::isnan(as_flt(g.run_scalar("return math.fmod(7, 0)"))));
+}
+
+TEST_CASE("evaluator: math.modf returns two values")
+{
+    EvalRig g;
+    auto r = g.run("return math.modf(3.75)");
+    REQUIRE(r.size() == 2);
+    CHECK(as_flt(r[0]) == 3.0);
+    CHECK(as_flt(r[1]) == 0.75);
+    // Negative
+    r = g.run("return math.modf(-2.5)");
+    REQUIRE(r.size() == 2);
+    CHECK(as_flt(r[0]) == -2.0);
+    CHECK(as_flt(r[1]) == -0.5);
+    // Already-integral float
+    r = g.run("return math.modf(5.0)");
+    REQUIRE(r.size() == 2);
+    CHECK(as_flt(r[0]) == 5.0);
+    CHECK(as_flt(r[1]) == 0.0);
+}
+
+TEST_CASE("evaluator: math.pow always float")
+{
+    EvalRig g;
+    CHECK(as_flt(g.run_scalar("return math.pow(2, 10)")) == 1024.0);
+    CHECK(as_flt(g.run_scalar("return math.pow(2, 0.5)")) ==
+          doctest::Approx(1.4142135623730951));
+    CHECK(as_flt(g.run_scalar("return math.pow(3, 2)")) == 9.0);
+}
+
+TEST_CASE("evaluator: math.min/max subtype preservation")
+{
+    EvalRig g;
+    // min — the chosen value's subtype is preserved
+    CHECK(as_int(g.run_scalar("return math.min(5, 3, 8)")) == 3);
+    // smallest is 3 (an int), so result is int even with float args
+    CHECK(as_int(g.run_scalar("return math.min(5.0, 3, 8)")) == 3);
+    // smallest is 0.5 (a float), result is float
+    CHECK(as_flt(g.run_scalar("return math.min(0.5, 3, 8)")) == 0.5);
+    CHECK(as_int(g.run_scalar("return math.min(-1, 0, 1)")) == -1);
+    // max
+    CHECK(as_int(g.run_scalar("return math.max(5, 3, 8)")) == 8);
+    CHECK(as_flt(g.run_scalar("return math.max(5.0, 3.0, 8.0)")) == 8.0);
+    CHECK(as_int(g.run_scalar("return math.max(5.0, 3, 8)")) == 8);
+    // single-arg
+    CHECK(as_int(g.run_scalar("return math.min(42)")) == 42);
+    CHECK(as_int(g.run_scalar("return math.max(42)")) == 42);
+    // negative numbers
+    CHECK(as_int(g.run_scalar("return math.max(-5, -3)")) == -3);
+}
+
+TEST_CASE("evaluator: math.tointeger")
+{
+    EvalRig g;
+    // int passes through
+    CHECK(as_int(g.run_scalar("return math.tointeger(5)")) == 5);
+    // integral float is converted
+    CHECK(as_int(g.run_scalar("return math.tointeger(5.0)")) == 5);
+    // non-integral float returns nil
+    CHECK(g.run_scalar("return math.tointeger(5.5)").is_nil());
+    // non-number returns nil
+    CHECK(g.run_scalar("return math.tointeger('5')").is_nil());
+    CHECK(g.run_scalar("return math.tointeger(nil)").is_nil());
+}
+
+TEST_CASE("evaluator: math.type")
+{
+    EvalRig g;
+    CHECK(as_str(g.run_scalar("return math.type(5)")) == "integer");
+    CHECK(as_str(g.run_scalar("return math.type(5.0)")) == "float");
+    CHECK(as_str(g.run_scalar("return math.type(5.5)")) == "float");
+    CHECK(g.run_scalar("return math.type('5')").is_nil());
+    CHECK(g.run_scalar("return math.type(nil)").is_nil());
+    CHECK(g.run_scalar("return math.type({})").is_nil());
+}
+
+TEST_CASE("evaluator: math.random — float form [0,1)")
+{
+    EvalRig g;
+    // After seeding, results are reproducible
+    g.run("math.randomseed(1)");
+    LuaValue v1 = g.run_scalar("return math.random()");
+    REQUIRE(v1.is_flt());
+    double d = v1.as_flt();
+    CHECK(d >= 0.0);
+    CHECK(d < 1.0);
+    // Same seed -> same value
+    g.run("math.randomseed(1)");
+    CHECK(as_flt(g.run_scalar("return math.random()")) == d);
+}
+
+TEST_CASE("evaluator: math.random — integer forms")
+{
+    EvalRig g;
+    g.run("math.randomseed(42)");
+    // random(n) -> integer in [1, n]
+    for (int i = 0; i < 50; ++i) {
+        LuaValue v = g.run_scalar("return math.random(6)");
+        REQUIRE(v.is_int());
+        long long r = v.as_int();
+        CHECK(r >= 1);
+        CHECK(r <= 6);
+    }
+    // random(m, n) -> integer in [m, n]
+    for (int i = 0; i < 50; ++i) {
+        LuaValue v = g.run_scalar("return math.random(10, 20)");
+        REQUIRE(v.is_int());
+        long long r = v.as_int();
+        CHECK(r >= 10);
+        CHECK(r <= 20);
+    }
+}
+
+TEST_CASE("evaluator: math.random — empty interval errors")
+{
+    EvalRig g;
+    auto r = g.run(
+        "local ok, err = pcall(math.random, 5, 2); "
+        "return ok, tostring(err)");
+    REQUIRE(r.size() == 2);
+    CHECK(as_bool(r[0]) == false);
+    CHECK(r[1].as_str()->data.find("interval is empty") != std::string::npos);
+}
+
+TEST_CASE("evaluator: math.randomseed — reproducibility across reseed")
+{
+    EvalRig g;
+    g.run("math.randomseed(123)");
+    long long a = as_int(g.run_scalar("return math.random(1, 1000000)"));
+    long long b = as_int(g.run_scalar("return math.random(1, 1000000)"));
+    g.run("math.randomseed(123)");
+    long long c = as_int(g.run_scalar("return math.random(1, 1000000)"));
+    long long d = as_int(g.run_scalar("return math.random(1, 1000000)"));
+    CHECK(a == c);
+    CHECK(b == d);
+    // And different seeds yield different sequences (probabilistic, but for
+    // two unrelated seeds the first draw should differ).
+    g.run("math.randomseed(456)");
+    long long e = as_int(g.run_scalar("return math.random(1, 1000000)"));
+    CHECK(e != a);
 }
 
 

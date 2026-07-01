@@ -79,6 +79,8 @@ add_executable(yueshi_lua_evaluator_test
     evaluator_test.cpp
     ../src/lua/evaluator.cpp
     ../src/lua/strlib.cpp
+    ../src/lua/tablib.cpp
+    ../src/lua/mathlib.cpp
     ../src/lua/pattern.cpp
     ../src/lua/numops.cpp
     ../src/lua/heap.cpp

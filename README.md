@@ -22,20 +22,25 @@ equality events, `__index`/`__newindex` chains, `__call`, `__len`,
 `__tostring`, `setmetatable`/`getmetatable`), **goto/labels**
 (`goto name` / `::name::`, backward and forward, in/out of any block or
 loop, with a per-block memoized label cache), **error handling**
-(`pcall`/`xpcall`/`error` with arbitrary-value error objects), and the
+(`pcall`/`xpcall`/`error` with arbitrary-value error objects), the
 **string library** (`len`/`sub`/`upper`/`lower`/`rep`/`reverse`/`byte`/
 `char`/`format` with `%a`/`%q`/`%p`, and the full pattern engine:
 `find`/`match`/`gmatch`/`gsub` with captures, `%b` balanced, `%f` frontier,
-back-references, all 3 gsub replacement kinds). Short strings are interned
-(GC-managed) and a per-type string metatable enables `("hi"):upper()`.
-Also includes a minimal standard library (`print`/`type`/`tostring`/
-`tonumber`/`error`/`assert`/`pcall`/`xpcall`/`ipairs`/`pairs`/`next`/
-`select`/`rawget`/`rawset`/`rawequal`/`rawlen`). It passes **134/134**
-evaluator unit tests (7 412 assertions), a **15/15** GC unit suite (53
-assertions), and a **20/20** pattern engine suite (107 assertions), all
-green under ASan + UBSan with leak detection. The remaining standard
-library (`table`/`math`/`io`/`os`, `pack`/`unpack`, `coroutine`/`debug`)
-is the next milestone.
+back-references, all 3 gsub replacement kinds), the **table library**
+(`insert`/`remove`/`concat`/`pack`/`unpack`/`move`/`sort` with a median-of-3
+quicksort that dispatches user comparators through the evaluator), and the
+**math library** (constants `pi`/`huge`/`maxinteger`/`mininteger`, subtype-
+preserving `abs`/`ceil`/`floor`/`min`/`max`, all `<cmath>` wrappers,
+`tointeger`/`type`, and `random`/`randomseed` backed by a per-evaluator
+xorshift64* PRNG). Short strings are interned (GC-managed) and a per-type
+string metatable enables `("hi"):upper()`. Also includes a minimal standard
+library (`print`/`type`/`tostring`/`tonumber`/`error`/`assert`/`pcall`/
+`xpcall`/`ipairs`/`pairs`/`next`/`select`/`rawget`/`rawset`/`rawequal`/
+`rawlen`). It passes **159/159** evaluator unit tests (10 710 assertions),
+a **15/15** GC unit suite (53 assertions), and a **20/20** pattern engine
+suite (107 assertions), all green under ASan + UBSan with leak detection.
+The remaining standard library (`string.pack`/`unpack`/`packsize`, `io`/`os`,
+`coroutine`/`debug`, `_ENV`/`load`/`require`) is the next milestone.
 See [TODO.md](TODO.md) for the full roadmap.
 
 ## Architecture
@@ -76,6 +81,10 @@ include/
     heap.h         Heap: owner of GC objects + mark-sweep collector
     numops.h       Number-aware arithmetic (Lua 5.4 int/float subtypes)
     evaluator.h    Tree-walking evaluator
+    strlib.h       String library + per-type string metatable installer
+    tablib.h       Table library installer
+    mathlib.h      Math library installer
+    pattern.h      Pure-C++ Lua pattern engine
     state.h        Interpreter State (owns Heap + drives lex→parse→eval)
 src/
   lua/
@@ -84,6 +93,10 @@ src/
     heap.cpp       Heap + GC tracer + key normalization
     numops.cpp     Arithmetic primitives
     evaluator.cpp  Evaluator + builtins
+    strlib.cpp     String library (basic, format, pattern wrappers, pack stubs)
+    tablib.cpp     Table library (insert/remove/concat/pack/unpack/move/sort)
+    mathlib.cpp    Math library (constants, cmath wrappers, random PRNG)
+    pattern.cpp    Pattern engine implementation
     state.cpp      State driver (run_string / run_file)
   yueshi.cpp       Interpreter CLI (yueshi <file.lua>)
   yueshic.cpp      Compiler CLI (stub — bytecode VM is M5)
