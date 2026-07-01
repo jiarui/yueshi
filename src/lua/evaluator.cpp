@@ -365,6 +365,20 @@ namespace ys
             return {mt ? LuaValue::table(mt) : LuaValue::nil()};
         }
 
+        // collectgarbage([opt [, arg]])
+        // Minimal stub: "collect"/"stop"/"restart" are no-ops; "count" returns
+        // a rough memory estimate; "countb" returns 0. Full GC integration is M4.
+        ValueVec b_collectgarbage(Evaluator& ev, ValueVec args)
+        {
+            std::string opt = (args.size() >= 1 && args[0].is_str())
+                                  ? args[0].as_str()->data : "collect";
+            if (opt == "count")
+                return {LuaValue::integer(
+                    static_cast<long long>(ev.heap().live_count()) / 1024 + 1),
+                        LuaValue::integer(0)};
+            return {LuaValue::integer(0)};
+        }
+
         // load(chunk [, chunkname [, mode [, env]]])
         // Compiles a Lua source string into a callable closure. Returns
         // (closure) on success, (nil, errmsg) on parse error. `mode` accepts
@@ -481,6 +495,7 @@ namespace ys
             add("rawlen",   builtins::b_rawlen);
             add("setmetatable", builtins::b_setmetatable);
             add("getmetatable", builtins::b_getmetatable);
+            add("collectgarbage", builtins::b_collectgarbage);
 
             // Install the string library + per-type string metatable (M3.1).
             install_string_lib(*this);

@@ -124,6 +124,33 @@ target_compile_definitions(yueshi_lua_pack_corpus PRIVATE
 yueshi_test_enable_sanitizers(yueshi_lua_pack_corpus)
 add_test(NAME yueshi_lua_pack_corpus COMMAND yueshi_lua_pack_corpus)
 
+# goto corpus acceptance: runs the M3.5-runnable portions of goto.lua
+# (compile-time checks R1-R4 + runtime goto behavior). The full goto.lua
+# requires M4 (debug.upvalueid + <close> attribute).
+add_executable(yueshi_lua_goto_corpus
+    goto_corpus.cpp
+    ../src/lua/state.cpp
+    ../src/lua/evaluator.cpp
+    ../src/lua/compile.cpp
+    ../src/lua/goto_check.cpp
+    ../src/lua/strlib.cpp
+    ../src/lua/tablib.cpp
+    ../src/lua/mathlib.cpp
+    ../src/lua/packagelib.cpp
+    ../src/lua/pattern.cpp
+    ../src/lua/numops.cpp
+    ../src/lua/heap.cpp
+    ../src/lua/parser.cpp
+    ../src/lua/lex.cpp)
+target_link_libraries(yueshi_lua_goto_corpus PRIVATE peglib yueshi_test_main)
+target_include_directories(yueshi_lua_goto_corpus PRIVATE
+    ${doctest_include_dir}
+    ${CMAKE_SOURCE_DIR}/include)
+target_compile_definitions(yueshi_lua_goto_corpus PRIVATE
+    YUESHI_CORPUS_DIR="${CMAKE_SOURCE_DIR}/test/corpus")
+yueshi_test_enable_sanitizers(yueshi_lua_goto_corpus)
+add_test(NAME yueshi_lua_goto_corpus COMMAND yueshi_lua_goto_corpus)
+
 # Pattern engine unit tests: pure-C++ tests over std::string_view.
 add_executable(yueshi_lua_pattern_test
     pattern_test.cpp
