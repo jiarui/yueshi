@@ -1462,6 +1462,146 @@ TEST_CASE("evaluator: pcall can be nested")
     CHECK(as_str(v[1]) == "outer");
 }
 
+// =====================================================================
+// M3.1: string library
+// =====================================================================
+
+TEST_CASE("evaluator: string.len / string.sub")
+{
+    EvalRig g;
+    CHECK(as_int(g.run_scalar("return string.len('hello')")) == 5);
+    CHECK(as_str(g.run_scalar("return string.sub('hello', 2, 4)")) == "ell");
+    CHECK(as_str(g.run_scalar("return string.sub('hello', -2)")) == "lo");
+    CHECK(as_str(g.run_scalar("return string.sub('hello', 2)")) == "ello");
+    CHECK(as_str(g.run_scalar("return string.sub('hello', -2, -1)")) == "lo");
+}
+
+TEST_CASE("evaluator: string.upper / string.lower")
+{
+    EvalRig g;
+    CHECK(as_str(g.run_scalar("return string.upper('Hi')")) == "HI");
+    CHECK(as_str(g.run_scalar("return string.lower('Hi')")) == "hi");
+}
+
+TEST_CASE("evaluator: string.rep / string.reverse")
+{
+    EvalRig g;
+    CHECK(as_str(g.run_scalar("return string.rep('ab', 3)")) == "ababab");
+    CHECK(as_str(g.run_scalar("return string.rep('x', 3, '-')")) == "x-x-x");
+    CHECK(as_str(g.run_scalar("return string.rep('ab', 0)")) == "");
+    CHECK(as_str(g.run_scalar("return string.reverse('abc')")) == "cba");
+}
+
+TEST_CASE("evaluator: string.byte / string.char")
+{
+    EvalRig g;
+    CHECK(as_int(g.run_scalar("return string.byte('A')")) == 65);
+    CHECK(as_str(g.run_scalar("return string.char(72, 105)")) == "Hi");
+}
+
+TEST_CASE("evaluator: per-type string metatable — method call syntax")
+{
+    EvalRig g;
+    CHECK(as_str(g.run_scalar("return ('hello'):upper()")) == "HELLO");
+    CHECK(as_int(g.run_scalar("return ('hello'):len()")) == 5);
+    CHECK(as_str(g.run_scalar("return ('hello'):sub(2, 4)")) == "ell");
+}
+
+TEST_CASE("evaluator: string.format basics")
+{
+    EvalRig g;
+    CHECK(as_str(g.run_scalar("return string.format('%d', 42)")) == "42");
+    CHECK(as_str(g.run_scalar("return string.format('%05d', 42)")) == "00042");
+    CHECK(as_str(g.run_scalar("return string.format('%x', 255)")) == "ff");
+    CHECK(as_str(g.run_scalar("return string.format('%f', 3.14)")) == "3.140000");
+    CHECK(as_str(g.run_scalar("return string.format('%.2f', 3.14159)")) == "3.14");
+    CHECK(as_str(g.run_scalar("return string.format('%s', 'hi')")) == "hi");
+    CHECK(as_str(g.run_scalar("return string.format('%-10s|', 'hi')")) == "hi        |");
+    CHECK(as_str(g.run_scalar("return string.format('%c', 65)")) == "A");
+    CHECK(as_str(g.run_scalar("return string.format('%%d', 42)")) == "%d");
+}
+
+TEST_CASE("evaluator: string.find")
+{
+    EvalRig g;
+    {
+        auto v = g.run("return string.find('hello world', 'world')");
+        REQUIRE(v.size() == 2);
+        CHECK(as_int(v[0]) == 7);
+        CHECK(as_int(v[1]) == 11);
+    }
+    {
+        auto v = g.run("return string.find('hello world', '(%w+) (%w+)')");
+        REQUIRE(v.size() == 4);
+        CHECK(as_int(v[0]) == 1);
+        CHECK(as_int(v[1]) == 11);
+        CHECK(as_str(v[2]) == "hello");
+        CHECK(as_str(v[3]) == "world");
+    }
+    CHECK(g.run_scalar("return string.find('hello', 'xyz')").is_nil() == true);
+}
+
+TEST_CASE("evaluator: string.match")
+{
+    EvalRig g;
+    CHECK(as_str(g.run_scalar("return string.match('2024-01-15', '(%d+)-(%d+)-(%d+)')")) == "2024");
+    {
+        auto v = g.run("return string.match('2024-01-15', '(%d+)-(%d+)-(%d+)')");
+        REQUIRE(v.size() == 3);
+        CHECK(as_str(v[0]) == "2024");
+        CHECK(as_str(v[1]) == "01");
+        CHECK(as_str(v[2]) == "15");
+    }
+}
+
+TEST_CASE("evaluator: string.gsub")
+{
+    EvalRig g;
+    {
+        auto v = g.run("return string.gsub('hello world', 'o', '0')");
+        REQUIRE(v.size() == 2);
+        CHECK(as_str(v[0]) == "hell0 w0rld");
+        CHECK(as_int(v[1]) == 2);
+    }
+    // Replacement with %0 (whole match)
+    CHECK(as_str(g.run_scalar("return string.gsub('hi', '(.)', '%1%1')")) == "hhii");
+    // Function replacement
+    CHECK(as_str(g.run_scalar(
+        "return string.gsub('hello', '.', function(c) return c:upper() end)")) == "HELLO");
+    // Table replacement with __index
+    CHECK(as_str(g.run_scalar(
+        "local t = setmetatable({}, {__index = function(t, k) return k:upper() end}); "
+        "return string.gsub('a alo b', '%w%w+', t)")) == "a ALO b");
+    // 5.3.3 empty-match rule
+    CHECK(as_str(g.run_scalar("return string.gsub('a b cd', ' *', '-')")) == "-a-b-c-d-");
+    // nil return from function: keep original
+    CHECK(as_str(g.run_scalar(
+        "return string.gsub('hello', '.', function() return nil end)")) == "hello");
+}
+
+TEST_CASE("evaluator: string.gmatch")
+{
+    EvalRig g;
+    CHECK(as_int(g.run_scalar(
+        "local s = 0; for w in string.gmatch('1,2,3,4', '[^,]+') do s = s + tonumber(w) end; "
+        "return s")) == 10);
+}
+
+TEST_CASE("evaluator: pattern %b balanced")
+{
+    EvalRig g;
+    CHECK(as_str(g.run_scalar("return string.match('(a(b)c)', '%b()')")) == "(a(b)c)");
+}
+
+TEST_CASE("evaluator: string interning — short string identity")
+{
+    EvalRig g;
+    // Two equal short strings should be the same object (interned).
+    // This is visible via == (which works on string content) and indirectly
+    // through format %p (though %p is hard to assert in unit tests).
+    CHECK(as_bool(g.run_scalar("local a = 'ab'; local b = 'ab'; return a == b")) == true);
+}
+
 
 
 

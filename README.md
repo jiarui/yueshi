@@ -21,17 +21,21 @@ full **metatable/metamethod** system (all arithmetic/bitwise/concat/ordering/
 equality events, `__index`/`__newindex` chains, `__call`, `__len`,
 `__tostring`, `setmetatable`/`getmetatable`), **goto/labels**
 (`goto name` / `::name::`, backward and forward, in/out of any block or
-loop, with a per-block memoized label cache), and **error handling**
-(`pcall`/`xpcall`/`error` with arbitrary-value error objects), plus a minimal
-standard library (`print`/`type`/`tostring`/`tonumber`/`error`/`assert`/
-`pcall`/`xpcall`/`ipairs`/`pairs`/`next`/`select`/`rawget`/`rawset`/
-`rawequal`/`rawlen`). It passes **122/122** evaluator unit tests (6 810
-assertions) and a **12/12** GC unit suite (42 assertions) that verifies
-unreachable cycles (and tables with metatables) are collected while escaping
-closures keep their captured environment alive. All
-gates are green under ASan + UBSan with leak detection. The full standard
-library (`string`/`table`/`math`/`io`/`os`, real `_G`/`_ENV`) is the next
-milestone.
+loop, with a per-block memoized label cache), **error handling**
+(`pcall`/`xpcall`/`error` with arbitrary-value error objects), and the
+**string library** (`len`/`sub`/`upper`/`lower`/`rep`/`reverse`/`byte`/
+`char`/`format` with `%a`/`%q`/`%p`, and the full pattern engine:
+`find`/`match`/`gmatch`/`gsub` with captures, `%b` balanced, `%f` frontier,
+back-references, all 3 gsub replacement kinds). Short strings are interned
+(GC-managed) and a per-type string metatable enables `("hi"):upper()`.
+Also includes a minimal standard library (`print`/`type`/`tostring`/
+`tonumber`/`error`/`assert`/`pcall`/`xpcall`/`ipairs`/`pairs`/`next`/
+`select`/`rawget`/`rawset`/`rawequal`/`rawlen`). It passes **134/134**
+evaluator unit tests (7 412 assertions), a **15/15** GC unit suite (53
+assertions), and a **20/20** pattern engine suite (107 assertions), all
+green under ASan + UBSan with leak detection. The remaining standard
+library (`table`/`math`/`io`/`os`, `pack`/`unpack`, `coroutine`/`debug`)
+is the next milestone.
 See [TODO.md](TODO.md) for the full roadmap.
 
 ## Architecture

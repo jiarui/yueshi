@@ -95,10 +95,15 @@ namespace ys
             // drive function calls.
             ValueVec call_value(const LuaValue& f, ValueVec args, std::size_t off);
 
+            // Per-type string metatable accessor (M3.1). strlib installs
+            // __index = string-lib-table so ("hi"):upper() works.
+            Table*& string_metatable() noexcept { return m_string_mt; }
+
         private:
             Heap&          m_heap;
             std::ostream*  m_out;
             Environment*   m_globals;       // non-owning; Heap owns it
+            Table*         m_string_mt{nullptr};  // per-type string metatable (M3.1)
             std::size_t    m_depth{0};
             const peg::SourceMap* m_map{nullptr};  // optional, for error locations
 

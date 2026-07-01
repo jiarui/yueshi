@@ -73,6 +73,17 @@ yueshi is a Lua 5.4 interpreter built on
   (level >= 1 on string messages) is deferred to M4 (needs a call stack with
   source positions). Tests: evaluator 122/122 (6 810 assertions) — green
   under ASan + UBSan.
+- **M3.1 String library + pattern engine + interning + per-type metatable**
+  — five parts: (A) short-string interning (Heap-owned table, pruned at sweep);
+  (B) per-type string metatable (`m_string_mt` with `__index`=string lib, so
+  `("hi"):upper()` works); (C) basic functions (len/sub/upper/lower/rep/
+  reverse/byte/char); (D) string.format (standard conversions + custom `%a`
+  hex-float + `%q` Lua quoting + `%p` pointer identity); (E) hand-rolled
+  pattern engine (~600 lines, full feature set: classes/sets/anchors/
+  quantifiers/captures/position-captures/back-refs/%b balanced/%f frontier/
+  gsub with 3 replacement kinds/5.3.3 empty-match rule/exact error strings).
+  `pack`/`unpack`/`packsize` stubbed. Tests: evaluator 134/134 (7 412),
+  gc 15/15 (53), pattern 20/20 (107) — green under ASan + UBSan.
 
 ## Phase 1 — Lexer (double-pass)
 

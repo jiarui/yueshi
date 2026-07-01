@@ -17,6 +17,8 @@ target_sources(yueshi PRIVATE
     src/yueshi.cpp
     src/lua/state.cpp
     src/lua/evaluator.cpp
+    src/lua/strlib.cpp
+    src/lua/pattern.cpp
     src/lua/numops.cpp
     src/lua/heap.cpp
     src/lua/parser.cpp
@@ -29,6 +31,8 @@ target_sources(yueshic PRIVATE
     src/yueshic.cpp
     src/lua/state.cpp
     src/lua/evaluator.cpp
+    src/lua/strlib.cpp
+    src/lua/pattern.cpp
     src/lua/numops.cpp
     src/lua/heap.cpp
     src/lua/parser.cpp

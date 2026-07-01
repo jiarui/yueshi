@@ -229,3 +229,47 @@ TEST_CASE("gc: a closure's metatable is traced")
     CHECK(swept == 0);   // closure -> env, closure -> mt, all reachable
     CHECK(g.heap.live_count() == 3);
 }
+
+TEST_CASE("gc: short strings are interned (same content = same pointer)")
+{
+    GCRig g;
+    auto* s1 = g.heap.make_string("hello");
+    auto* s2 = g.heap.make_string("hello");
+    CHECK(s1 == s2);   // interned: same pointer
+    CHECK(g.heap.live_count() == 1);
+
+    // Different content = different pointer
+    auto* s3 = g.heap.make_string("world");
+    CHECK(s1 != s3);
+    CHECK(g.heap.live_count() == 2);
+}
+
+TEST_CASE("gc: long strings are NOT interned")
+{
+    GCRig g;
+    std::string long1(50, 'x');  // > 40 bytes
+    std::string long2 = long1;
+    auto* s1 = g.heap.make_string(long1);
+    auto* s2 = g.heap.make_string(long2);
+    CHECK(s1 != s2);   // long strings: fresh allocation
+    CHECK(g.heap.live_count() == 2);
+}
+
+TEST_CASE("gc: interned string pruned at sweep when unreachable")
+{
+    GCRig g;
+    auto* keep = g.heap.make_string("keep");
+    (void)g.heap.make_string("temp");   // not rooted
+    CHECK(g.heap.live_count() == 2);
+
+    g.roots.push_back(static_cast<GCObject*>(keep));
+    std::size_t swept = g.heap.collect([&](auto visitor) { g.mark_all(visitor); });
+    CHECK(swept == 1);
+    CHECK(g.heap.live_count() == 1);
+
+    // The intern table should no longer map "temp" — a new make_string should
+    // produce a new allocation (not the swept one).
+    auto* temp2 = g.heap.make_string("temp");
+    CHECK(temp2 != nullptr);
+    CHECK(g.heap.live_count() == 2);
+}

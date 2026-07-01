@@ -7,6 +7,7 @@
 
 #include "lua/ast.h"
 #include "lua/numops.h"
+#include "lua/strlib.h"
 
 namespace ys
 {
@@ -370,6 +371,9 @@ namespace ys
             add("rawlen",   builtins::b_rawlen);
             add("setmetatable", builtins::b_setmetatable);
             add("getmetatable", builtins::b_getmetatable);
+
+            // Install the string library + per-type string metatable (M3.1).
+            install_string_lib(*this);
         }
 
         // -------------------------------------------------------------------
@@ -1089,7 +1093,8 @@ namespace ys
         {
             if (v.is_table())   return v.as_table()->metatable;
             if (v.is_closure()) return v.as_closure()->metatable;
-            return nullptr;   // scalars + strings have no metatable in M2.1
+            if (v.is_str())     return m_string_mt;   // per-type (M3.1)
+            return nullptr;
         }
 
         LuaValue Evaluator::getmetamethod(const LuaValue& v, std::string_view ev)

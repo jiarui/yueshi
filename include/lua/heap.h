@@ -17,6 +17,8 @@
 
 #include <cstddef>
 #include <string>
+#include <string_view>
+#include <unordered_map>
 #include <utility>
 
 #include "lua/value.h"   // GCObject, object types, LuaValue, LuaKey
@@ -39,12 +41,20 @@ namespace ys
             // may trigger a collection — but the evaluator holds an
             // AllocationScope across each expression to suppress that, so a
             // collection never tears down a half-built value.
+            // make_string interns short strings (<= MAX_SHORT_LEN): equal short
+            // content yields the SAME String* pointer (enables %p identity,
+            // short-string ==, and bounds pattern-engine equality cost). Long
+            // strings are always fresh allocations.
             String*      make_string(std::string s);
             Table*       make_table();
             Closure*     make_closure(const FuncBody* body, Environment* env,
                                       bool is_vararg);
             Builtin*     make_builtin(std::string name, BuiltinFn fn);
             Environment* make_env(Environment* parent);
+
+            // Maximum length (in bytes) for a short (interned) string. Matches
+            // reference Lua's LUAI_MAXSHORTLEN.
+            static constexpr std::size_t MAX_SHORT_LEN = 40;
 
             // The number of live objects. For tests + diagnostics.
             std::size_t live_count() const noexcept { return m_count; }
@@ -97,9 +107,18 @@ namespace ys
             // The mark worklist (transitive closure frontier).
             std::vector<GCObject*> m_worklist;
 
+            // Short-string intern table: maps content -> the canonical String*.
+            // The string_view keys borrow each String's data storage (stable:
+            // GC objects are heap-allocated and never moved). NOT a GC root —
+            // interned strings survive via normal reachability; sweep() prunes
+            // entries pointing to about-to-be-freed objects before freeing them.
+            std::unordered_map<std::string_view, String*> m_intern;
+
             void link(GCObject* o, ObjType type) noexcept;
             void free_one(GCObject* o) noexcept;   // cast on type, delete derived
             void maybe_collect();
+            // Erase intern-table entries whose String* is about to be freed.
+            void prune_intern_entry(String* s) noexcept;
 
             void reset_marks() noexcept;
             void push_mark(GCObject* o) noexcept;   // white->black, enqueue

@@ -78,6 +78,8 @@ add_test(NAME yueshi_lua_gc_test COMMAND yueshi_lua_gc_test)
 add_executable(yueshi_lua_evaluator_test
     evaluator_test.cpp
     ../src/lua/evaluator.cpp
+    ../src/lua/strlib.cpp
+    ../src/lua/pattern.cpp
     ../src/lua/numops.cpp
     ../src/lua/heap.cpp
     ../src/lua/parser.cpp
@@ -88,3 +90,14 @@ target_include_directories(yueshi_lua_evaluator_test PRIVATE
     ${CMAKE_SOURCE_DIR}/include)
 yueshi_test_enable_sanitizers(yueshi_lua_evaluator_test)
 add_test(NAME yueshi_lua_evaluator_test COMMAND yueshi_lua_evaluator_test)
+
+# Pattern engine unit tests: pure-C++ tests over std::string_view.
+add_executable(yueshi_lua_pattern_test
+    pattern_test.cpp
+    ../src/lua/pattern.cpp)
+target_link_libraries(yueshi_lua_pattern_test PRIVATE peglib yueshi_test_main)
+target_include_directories(yueshi_lua_pattern_test PRIVATE
+    ${doctest_include_dir}
+    ${CMAKE_SOURCE_DIR}/include)
+yueshi_test_enable_sanitizers(yueshi_lua_pattern_test)
+add_test(NAME yueshi_lua_pattern_test COMMAND yueshi_lua_pattern_test)

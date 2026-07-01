@@ -50,8 +50,24 @@ namespace ys
         // -------------------------------------------------------------------
         // Typed allocators
         // -------------------------------------------------------------------
+        // Short strings are interned: equal content returns the SAME String*.
+        // Long strings bypass interning (fresh allocation every time).
         String* Heap::make_string(std::string s)
         {
+            if (s.size() <= MAX_SHORT_LEN) {
+                std::string_view key{s};
+                auto it = m_intern.find(key);
+                if (it != m_intern.end()) {
+                    return it->second;   // canonical short string
+                }
+                // Allocate, then insert using the String's own data storage as
+                // the key (stable for the object's lifetime).
+                auto* o = new String(std::move(s));
+                link(o, ObjType::String);
+                m_intern.emplace(std::string_view{o->data}, o);
+                maybe_collect();
+                return o;
+            }
             auto* o = new String(std::move(s));
             link(o, ObjType::String);
             maybe_collect();
@@ -111,6 +127,16 @@ namespace ys
             // trips mid-expression it is deferred to the next boundary.
         }
 
+        // Erase a short-string intern entry before its String is freed. Called
+        // from sweep() for every unmarked String. The string_view key borrows
+        // the String's data, which is still valid at this point (free_one
+        // happens immediately after).
+        void Heap::prune_intern_entry(String* s) noexcept
+        {
+            if (s->data.size() <= MAX_SHORT_LEN)
+                m_intern.erase(std::string_view{s->data});
+        }
+
         // -------------------------------------------------------------------
         // Mark phase
         // -------------------------------------------------------------------
@@ -146,6 +172,9 @@ namespace ys
             while (*pp) {
                 GCObject* cur = *pp;
                 if (!cur->marked) {
+                    // Prune intern entry before freeing (the key borrows data).
+                    if (cur->type == ObjType::String)
+                        prune_intern_entry(static_cast<String*>(cur));
                     *pp = cur->next;     // unlink
                     free_one(cur);
                     --m_count;
