@@ -18,6 +18,7 @@ target_sources(yueshi PRIVATE
     src/lua/state.cpp
     src/lua/evaluator.cpp
     src/lua/compile.cpp
+    src/lua/goto_check.cpp
     src/lua/strlib.cpp
     src/lua/tablib.cpp
     src/lua/mathlib.cpp
@@ -35,6 +36,7 @@ target_sources(yueshic PRIVATE
     src/lua/state.cpp
     src/lua/evaluator.cpp
     src/lua/compile.cpp
+    src/lua/goto_check.cpp
     src/lua/strlib.cpp
     src/lua/tablib.cpp
     src/lua/mathlib.cpp

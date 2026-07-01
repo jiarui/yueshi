@@ -9,6 +9,7 @@
 
 #include "lua/ast.h"
 #include "lua/compile.h"
+#include "lua/goto_check.h"
 #include "lua/numops.h"
 #include "lua/strlib.h"
 #include "lua/tablib.h"
@@ -405,6 +406,14 @@ namespace ys
                         LuaValue::str(ev.heap().make_string(errmsg))};
             }
 
+            // Static goto/label scope analysis (R1-R4).
+            try {
+                check_goto_scopes(*pr.ast, chunk.as_str()->data);
+            } catch (const LuaError& e) {
+                return {LuaValue::nil(),
+                        LuaValue::str(ev.heap().make_string(e.what()))};
+            }
+
             const FuncBody* fb = ev.retain_chunk_ast(std::move(*pr.ast));
             Closure* clo = ev.heap().make_closure(fb, nullptr, env_table, true);
             return {LuaValue::closure(clo)};
@@ -429,12 +438,15 @@ namespace ys
                                ": No such file or directory", 0);
             }
             std::string source{std::istreambuf_iterator<char>{is}, {}};
+            std::string source_copy = source;  // for goto check error messages
 
             ParseResult pr = compile_source(std::move(source));
             if (!pr) {
                 std::string msg = pr.errors.empty() ? "syntax error" : pr.errors[0];
                 throw LuaError(msg, 0);
             }
+
+            check_goto_scopes(*pr.ast, source_copy);
 
             const FuncBody* fb = ev.retain_chunk_ast(std::move(*pr.ast));
             Closure* clo = ev.heap().make_closure(fb, nullptr, &ev.globals(), true);

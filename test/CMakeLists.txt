@@ -79,6 +79,7 @@ add_executable(yueshi_lua_evaluator_test
     evaluator_test.cpp
     ../src/lua/evaluator.cpp
     ../src/lua/compile.cpp
+    ../src/lua/goto_check.cpp
     ../src/lua/strlib.cpp
     ../src/lua/tablib.cpp
     ../src/lua/mathlib.cpp
@@ -101,6 +102,7 @@ add_executable(yueshi_lua_pack_corpus
     pack_corpus.cpp
     ../src/lua/evaluator.cpp
     ../src/lua/compile.cpp
+    ../src/lua/goto_check.cpp
     ../src/lua/strlib.cpp
     ../src/lua/tablib.cpp
     ../src/lua/mathlib.cpp

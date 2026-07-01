@@ -7,6 +7,7 @@
 #include <utility>
 
 #include "lua/compile.h"
+#include "lua/goto_check.h"
 
 namespace ys
 {
@@ -29,6 +30,7 @@ namespace ys
             auto ast = parse_string(source, errors);
             if (!ast)
                 throw LuaError("syntax error before evaluation", 0);
+            check_goto_scopes(*ast, source);
             return m_eval.run(std::move(*ast));
         }
 
@@ -54,6 +56,7 @@ namespace ys
                 return false;
             }
             try {
+                check_goto_scopes(*ast, source);
                 m_eval.run(std::move(*ast));
                 return true;
             }

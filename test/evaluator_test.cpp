@@ -2489,6 +2489,138 @@ TEST_CASE("evaluator: dofile")
     std::remove("/tmp/yueshi_dofile_test.lua");
 }
 
+// =====================================================================
+// M3.5 Part C: static goto/label scope analysis
+// =====================================================================
+
+TEST_CASE("evaluator: goto R1 — no visible label")
+{
+    EvalRig g;
+    // Label in a nested block is not visible from outside.
+    auto r = g.run("local ok, err = pcall(load, 'goto l1; do ::l1:: end'); "
+                   "return ok, tostring(err)");
+    // load() should succeed (no syntax error), but calling the loaded
+    // chunk... wait, the goto check happens at load() time.
+    // Actually, load() returns (nil, errmsg) for goto violations.
+    r = g.run("local f, err = load('goto l1; do ::l1:: end'); "
+              "return f, tostring(err)");
+    CHECK(r[0].is_nil());
+    CHECK(as_str(r[1]).find("label 'l1'") != std::string::npos);
+
+    // Forward goto with label in nested block.
+    r = g.run("local f, err = load('goto l1 do ::l1:: end'); "
+              "return f, tostring(err)");
+    CHECK(r[0].is_nil());
+    CHECK(as_str(r[1]).find("label 'l1'") != std::string::npos);
+}
+
+TEST_CASE("evaluator: goto R3 — duplicate label")
+{
+    EvalRig g;
+    auto r = g.run("local f, err = load('::l1:: ::l1::'); "
+              "return f, tostring(err)");
+    CHECK(r[0].is_nil());
+    CHECK(as_str(r[1]).find("label 'l1'") != std::string::npos);
+    CHECK(as_str(r[1]).find("already defined") != std::string::npos);
+
+    // Duplicate across nested blocks (outer visible inside).
+    r = g.run("local f, err = load('::l1:: do ::l1:: end'); "
+              "return f, tostring(err)");
+    CHECK(r[0].is_nil());
+    CHECK(as_str(r[1]).find("label 'l1'") != std::string::npos);
+}
+
+TEST_CASE("evaluator: goto R2 — jumps into local scope")
+{
+    EvalRig g;
+    // Forward goto past a local declaration to a label where the local
+    // is in scope. The label is NOT at block end (statements follow).
+    auto r = g.run("local f, err = load('goto l1; local aa; ::l1:: ::l2:: print(3)'); "
+              "return f, tostring(err)");
+    CHECK(r[0].is_nil());
+    CHECK(as_str(r[1]).find("local 'aa'") != std::string::npos);
+}
+
+TEST_CASE("evaluator: goto R2 — repeat-until scope")
+{
+    EvalRig g;
+    // The repeat body's locals are in scope at the until condition, so
+    // a label after the local is NOT at block end.
+    auto r = g.run(
+        "local f, err = load('repeat if x then goto cont end local xuxu = 10 "
+        "::cont:: until xuxu < x'); "
+        "return f, tostring(err)");
+    CHECK(r[0].is_nil());
+    CHECK(as_str(r[1]).find("local 'xuxu'") != std::string::npos);
+}
+
+TEST_CASE("evaluator: goto R2 exempt — label at block end")
+{
+    EvalRig g;
+    // A label at the end of a block gets the exemption: the goto can
+    // jump over a local declaration to the end-of-block label.
+    auto r = g.run("local f, err = load('do goto l1; local a = 23; ::l1:: end'); "
+              "return f, tostring(err)");
+    CHECK(r[0].is_closure());  // should compile cleanly
+}
+
+TEST_CASE("evaluator: goto — legal backward jump over local")
+{
+    EvalRig g;
+    // Backward goto to a label before a local declaration is legal.
+    auto r = g.run("local f = load('::a:: goto a'); "
+              "return type(f)");
+    CHECK(as_str(r[0]) == "function");
+}
+
+TEST_CASE("evaluator: goto — legal forward jump in while loop")
+{
+    EvalRig g;
+    // Jumping over a local to a label at the end of a while body.
+    auto r = g.run("local f = load('while true do goto l1; local x = 45; "
+              "::l1:: end'); return type(f)");
+    CHECK(as_str(r[0]) == "function");
+}
+
+TEST_CASE("evaluator: goto — legal jump in function")
+{
+    EvalRig g;
+    // Backward goto inside a function body.
+    auto r = g.run("local f = load('function g() goto a; local x; ::a:: end'); "
+              "return type(f)");
+    CHECK(as_str(r[0]) == "function");
+}
+
+TEST_CASE("evaluator: break outside loop")
+{
+    EvalRig g;
+    auto r = g.run("local f, err = load('break'); "
+              "return f, tostring(err)");
+    CHECK(r[0].is_nil());
+    CHECK(as_str(r[1]).find("break") != std::string::npos);
+    CHECK(as_str(r[1]).find("outside") != std::string::npos);
+}
+
+TEST_CASE("evaluator: goto.lua errmsg patterns")
+{
+    EvalRig g;
+    // A helper that mirrors goto.lua's errmsg(code, m): asserts load(code)
+    // fails and the message contains m.
+    auto errmsg = [&](const char* code, const char* m) {
+        auto r = g.run(std::string("local f, err = load(") +
+                       "[[" + code + "]]); "
+                       "return f, tostring(err)");
+        bool ok = r[0].is_nil();
+        if (ok && r[1].is_str())
+            ok = r[1].as_str()->data.find(m) != std::string::npos;
+        return ok;
+    };
+    CHECK(errmsg("goto l1; do ::l1:: end", "label 'l1'"));
+    CHECK(errmsg("do ::l1:: end goto l1;", "label 'l1'"));
+    CHECK(errmsg("::l1:: ::l1::", "label 'l1'"));
+    CHECK(errmsg("goto l1; local aa; ::l1:: ::l2:: print(3)", "local 'aa'"));
+}
+
 
 
 
