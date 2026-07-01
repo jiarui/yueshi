@@ -78,6 +78,7 @@ add_test(NAME yueshi_lua_gc_test COMMAND yueshi_lua_gc_test)
 add_executable(yueshi_lua_evaluator_test
     evaluator_test.cpp
     ../src/lua/evaluator.cpp
+    ../src/lua/compile.cpp
     ../src/lua/strlib.cpp
     ../src/lua/tablib.cpp
     ../src/lua/mathlib.cpp
@@ -99,6 +100,7 @@ add_test(NAME yueshi_lua_evaluator_test COMMAND yueshi_lua_evaluator_test)
 add_executable(yueshi_lua_pack_corpus
     pack_corpus.cpp
     ../src/lua/evaluator.cpp
+    ../src/lua/compile.cpp
     ../src/lua/strlib.cpp
     ../src/lua/tablib.cpp
     ../src/lua/mathlib.cpp

@@ -9,6 +9,8 @@
 #include "doctest.h"
 
 #include <cmath>
+#include <cstdio>
+#include <fstream>
 #include <limits>
 #include <sstream>
 #include <string>
@@ -2396,6 +2398,95 @@ TEST_CASE("evaluator: _ENV rebind via assignment")
     // _ENV = tbl rebinds globals for the current scope.
     CHECK(as_int(g.run_scalar(
         "local t = {}; _ENV = t; x = 1; return t.x")) == 1);
+}
+
+// =====================================================================
+// M3.5 Part B: load / loadstring / dofile
+// =====================================================================
+
+TEST_CASE("evaluator: load basic")
+{
+    EvalRig g;
+    // load + call.
+    CHECK(as_int(g.run_scalar("return (load('return 42'))()")) == 42);
+    // loadstring alias.
+    CHECK(as_int(g.run_scalar("return (loadstring('return 99'))()")) == 99);
+    // load returns a function.
+    CHECK(g.run_scalar("return type(load('return 1'))").as_str()->data == "function");
+}
+
+TEST_CASE("evaluator: load syntax error")
+{
+    EvalRig g;
+    // Syntax error returns nil + error message (does NOT throw).
+    auto r = g.run("local f, err = load('if then'); return f, tostring(err)");
+    CHECK(r[0].is_nil());
+    CHECK(as_str(r[1]).find("token") != std::string::npos);
+    // Non-string first arg.
+    r = g.run("local f, err = load(42); return f, err");
+    CHECK(r[0].is_nil());
+}
+
+TEST_CASE("evaluator: load vararg chunk")
+{
+    EvalRig g;
+    // Loaded chunks are vararg: ... collects arguments.
+    CHECK(as_int(g.run_scalar(
+        "return (load('return ...'))(1, 2, 3)")) == 1);
+    // select('#', ...) inside a loaded chunk.
+    CHECK(as_int(g.run_scalar(
+        "return select('#', (load('return ...'))())")) == 0);
+}
+
+TEST_CASE("evaluator: load with custom env")
+{
+    EvalRig g;
+    // env argument controls _ENV for the loaded chunk.
+    CHECK(as_int(g.run_scalar(
+        "return (load('return x', 'chunk', 'bt', {x = 42}))()")) == 42);
+    // Writes go to the env table.
+    CHECK(as_int(g.run_scalar(
+        "local env = {}; (load('x = 1', 'chunk', 'bt', env))(); return env.x")) == 1);
+    // Default env is _G.
+    CHECK(as_int(g.run_scalar(
+        "x = 7; return (load('return x'))()")) == 7);
+}
+
+TEST_CASE("evaluator: load binary mode rejection")
+{
+    EvalRig g;
+    auto r = g.run("local f, err = load('return 1', 'chunk', 'b'); "
+                   "return f, tostring(err)");
+    CHECK(r[0].is_nil());
+    CHECK(as_str(r[1]).find("binary") != std::string::npos);
+}
+
+TEST_CASE("evaluator: load with closures inside")
+{
+    EvalRig g;
+    // A loaded chunk can define and use closures.
+    CHECK(as_int(g.run_scalar(
+        "local f = load('local x = 0; return function() x = x + 1; return x end'); "
+        "local c = f(); c(); c(); return c()")) == 3);
+}
+
+TEST_CASE("evaluator: dofile")
+{
+    EvalRig g;
+    // Write a temp file and dofile it.
+    {
+        std::ofstream os("/tmp/yueshi_dofile_test.lua");
+        os << "return 42\n";
+    }
+    CHECK(as_int(g.run_scalar(
+        "return dofile('/tmp/yueshi_dofile_test.lua')")) == 42);
+
+    // dofile with nonexistent file errors.
+    auto r = g.run("local ok, err = pcall(dofile, '/tmp/yueshi_nonexistent.lua'); "
+                   "return ok, tostring(err)");
+    CHECK(as_bool(r[0]) == false);
+
+    std::remove("/tmp/yueshi_dofile_test.lua");
 }
 
 

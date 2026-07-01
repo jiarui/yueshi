@@ -101,6 +101,12 @@ namespace ys
             // __index = string-lib-table so ("hi"):upper() works.
             Table*& string_metatable() noexcept { return m_string_mt; }
 
+            // Retain an AST root so closures created by load() can safely
+            // reference its FuncBody nodes. The AST is not GC'd (Closure::body
+            // is a raw pointer), so it must live for the Evaluator's lifetime.
+            // Returns a stable const FuncBody* into the retained tree.
+            const FuncBody* retain_chunk_ast(AstNode chunk_root);
+
         private:
             Heap&          m_heap;
             std::ostream*  m_out;
@@ -120,6 +126,11 @@ namespace ys
                 bool built{false};
             };
             std::unordered_map<const Block*, LabelCache> m_labels;
+
+            // AST roots from load()/dofile(). These are kept alive because
+            // Closure::body is a raw pointer (not GC'd). Each entry is a
+            // synthesized FuncBody wrapping the parsed chunk's Block.
+            std::vector<AstNode> m_loaded_chunks;
 
             // Statement/expression evaluation (defined in evaluator.cpp).
             Control  eval_block(const Block&, Environment*);

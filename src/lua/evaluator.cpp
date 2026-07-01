@@ -1,11 +1,14 @@
 #include "lua/evaluator.h"
 
 #include <cstdlib>
+#include <fstream>
+#include <iterator>
 #include <ostream>
 #include <utility>
 #include <variant>
 
 #include "lua/ast.h"
+#include "lua/compile.h"
 #include "lua/numops.h"
 #include "lua/strlib.h"
 #include "lua/tablib.h"
@@ -360,6 +363,84 @@ namespace ys
             return {mt ? LuaValue::table(mt) : LuaValue::nil()};
         }
 
+        // load(chunk [, chunkname [, mode [, env]]])
+        // Compiles a Lua source string into a callable closure. Returns
+        // (closure) on success, (nil, errmsg) on parse error. `mode` accepts
+        // "t" (text only), "b" (binary — not supported), "bt" (both, default).
+        // `env` is the _ENV table for the loaded chunk (defaults to _G).
+        ValueVec b_load(Evaluator& ev, ValueVec args)
+        {
+            LuaValue chunk = args.size() >= 1 ? args[0] : LuaValue::nil();
+            std::string source;
+            if (chunk.is_str()) {
+                source = chunk.as_str()->data;
+            } else {
+                return {LuaValue::nil(),
+                        LuaValue::str(ev.heap().make_string(
+                            "bad argument #1 to 'load' (string expected, got " +
+                            std::string(type_name(chunk)) + ")"))};
+            }
+
+            // mode: "b" (binary — unsupported), "t" (text), "bt" (both).
+            std::string mode = (args.size() >= 3 && args[2].is_str())
+                ? args[2].as_str()->data : "bt";
+            if (mode.find('t') == std::string::npos) {
+                return {LuaValue::nil(),
+                        LuaValue::str(ev.heap().make_string(
+                            "attempt to load a binary chunk (not available)"))};
+            }
+
+            // env: the _ENV for the loaded chunk. Default: _G.
+            Table* env_table = &ev.globals();
+            if (args.size() >= 4 && args[3].is_table())
+                env_table = args[3].as_table();
+
+            // Compile.
+            ParseResult pr = compile_source(std::move(source));
+            if (!pr) {
+                std::string errmsg;
+                for (auto& e : pr.errors) errmsg += e + "\n";
+                if (!errmsg.empty() && errmsg.back() == '\n') errmsg.pop_back();
+                return {LuaValue::nil(),
+                        LuaValue::str(ev.heap().make_string(errmsg))};
+            }
+
+            const FuncBody* fb = ev.retain_chunk_ast(std::move(*pr.ast));
+            Closure* clo = ev.heap().make_closure(fb, nullptr, env_table, true);
+            return {LuaValue::closure(clo)};
+        }
+
+        // dofile([filename])
+        // Reads + compiles + executes a file. Returns the chunk's return
+        // values (empty if none). With no filename, reads from stdin (needs
+        // the io lib — M3.4). Errors are raised as Lua errors.
+        ValueVec b_dofile(Evaluator& ev, ValueVec args)
+        {
+            std::string path;
+            if (args.size() >= 1 && args[0].is_str()) {
+                path = args[0].as_str()->data;
+            } else {
+                throw LuaError("bad argument #1 to 'dofile' (string expected)", 0);
+            }
+
+            std::ifstream is(path, std::ios::binary);
+            if (!is) {
+                throw LuaError("cannot open " + path +
+                               ": No such file or directory", 0);
+            }
+            std::string source{std::istreambuf_iterator<char>{is}, {}};
+
+            ParseResult pr = compile_source(std::move(source));
+            if (!pr) {
+                std::string msg = pr.errors.empty() ? "syntax error" : pr.errors[0];
+                throw LuaError(msg, 0);
+            }
+
+            const FuncBody* fb = ev.retain_chunk_ast(std::move(*pr.ast));
+            Closure* clo = ev.heap().make_closure(fb, nullptr, &ev.globals(), true);
+            return ev.call_value(LuaValue::closure(clo), {}, 0);
+        }
+
         } // namespace builtins
 
         void Evaluator::install_builtins()
@@ -393,6 +474,34 @@ namespace ys
             // M3.2-3: table + math libraries.
             install_table_lib(*this);
             install_math_lib(*this);
+
+            // M3.5-B: load/loadstring/dofile.
+            add("load",      builtins::b_load);
+            add("loadstring", builtins::b_load);   // alias
+            add("dofile",    builtins::b_dofile);
+        }
+
+        // Retain a parsed chunk's AST, returning a stable FuncBody* that
+        // closures can reference. The Chunk's Block is moved into a synthesized
+        // FuncBody (so the closure-call machinery, which expects FuncBody, can
+        // consume it). The FuncBody lives in m_loaded_chunks for the Evaluator's
+        // lifetime — not GC'd, but bounded by program behavior.
+        const FuncBody* Evaluator::retain_chunk_ast(AstNode root)
+        {
+            if (!holds<Chunk>(root))
+                throw LuaError("expected a chunk AST", root.start());
+            Chunk& chunk = get<Chunk>(root);
+            // Synthesize a FuncBody wrapping the chunk's Block. The main
+            // chunk is vararg, so include a Vararg param marker — this is
+            // what call_value checks to collect leftover args into `...`.
+            FuncBody fb;
+            fb.params.push_back({Param::Kind::Vararg, {}, 0, 0});
+            fb.body = Box{AstNode{std::move(chunk.body)}};
+            fb.start = chunk.start;
+            fb.end = chunk.end;
+            // Move into the retention vector.
+            m_loaded_chunks.push_back(AstNode{std::move(fb)});
+            return &get<FuncBody>(m_loaded_chunks.back());
         }
 
         // -------------------------------------------------------------------

@@ -6,8 +6,7 @@
 #include <sstream>
 #include <utility>
 
-#include "lua/lex.h"
-#include "lua/parser.h"
+#include "lua/compile.h"
 
 namespace ys
 {
@@ -19,26 +18,9 @@ namespace ys
         std::optional<AstNode> State::parse_string(const std::string& source,
                                                    std::vector<std::string>& errors)
         {
-            Tokenizer tok{source};
-            std::vector<Token> tokens = tok.tokenize();
-
-            // A lex error is signalled by a sentinel token with id == -1
-            // sitting just before the EOS token. Only then is the furthest-
-            // failure diagnostic meaningful (peglib's take_error can return a
-            // spurious "expected ..." from normal end-of-stream backtracking on
-            // a CLEAN lex, which must not be reported as an error).
-            bool lex_failed = false;
-            for (std::size_t i = 0; i + 1 < tokens.size(); ++i)
-                if (tokens[i].id == -1) lex_failed = true;
-            if (lex_failed)
-                if (auto le = tok.take_error()) errors.push_back(*le);
-
-            Parser p{std::move(tokens)};
-            std::optional<AstNode> ast = p.parse();
-            for (auto& e : p.take_errors()) errors.push_back(std::move(e));
-
-            if (lex_failed) return std::nullopt;
-            return ast;
+            auto pr = compile_source(source);
+            errors = std::move(pr.errors);
+            return std::move(pr.ast);
         }
 
         ValueVec State::run_string(const std::string& source)
