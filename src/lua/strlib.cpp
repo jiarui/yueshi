@@ -1,11 +1,13 @@
 #include "lua/strlib.h"
 
 #include <algorithm>
+#include <bit>
 #include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -38,15 +40,23 @@ namespace ys
             return args[idx].as_str()->data;
         }
 
-        // Fetch an integer argument with a default.
+        // Fetch an integer argument with a default. Accepts floats whose
+        // value is exactly integral (Lua 5.4 coerces them for these positions).
         static long long int_arg(const ValueVec& args, int idx,
                                  long long dflt)
         {
             if (static_cast<std::size_t>(idx) >= args.size())
                 return dflt;
-            if (!args[idx].is_int())
-                throw LuaError("bad argument (number expected)", 0);
-            return args[idx].as_int();
+            const LuaValue& v = args[idx];
+            if (v.is_int()) return v.as_int();
+            if (v.is_flt()) {
+                double f = v.as_flt();
+                if (std::floor(f) == f &&
+                    f >= static_cast<double>(std::numeric_limits<long long>::min()) &&
+                    f <= static_cast<double>(std::numeric_limits<long long>::max()))
+                    return static_cast<long long>(f);
+            }
+            throw LuaError("bad argument (number expected)", 0);
         }
 
         // Make a string value via the heap.
@@ -830,12 +840,530 @@ namespace ys
                     LuaValue::integer(count)};
         }
 
+        // ===================================================================
+        // string.pack / unpack / packsize
+        //
+        // Direct port of Lua 5.4's lstrlib.c pack machinery (the KOption
+        // enum, Header, getoption/getdetails, packint/unpackint, and the
+        // three entry points). Semantics must match reference Lua byte-for-
+        // byte (tpack.lua's ~420 assertions check exact byte layouts and
+        // error strings). Key design points preserved:
+        //   - islittle + maxalign are MUTABLE HEADER STATE scanned left-to-
+        //     right; they are NOT per-option attributes. This is the single
+        //     most common porting bug.
+        //   - Kchar ('c') is never aligned, even when size > 1.
+        //   - 'X' borrows its alignment from the FOLLOWING option.
+        //   - unpackint has three regimes (size <, ==, > SZINT); the '>'
+        //     regime validates that high bytes are canonical sign-extension
+        //     (all 0x00 or all 0xFF matching the decoded sign bit).
+        //   - packsize overflow guard is `totalsize <= MAXSIZE - size`
+        //     where MAXSIZE == INT_MAX (saturating add, NOT MAXSIZE/2).
+        // ===================================================================
+        namespace packimpl {
+
+        // Platform constants (match reference Lua on 64-bit Linux/macOS).
+        static constexpr int           MAXINTSIZE = 16;
+        static constexpr int           NB         = 8;            // CHAR_BIT
+        static constexpr unsigned char MC         = 0xFF;
+        static constexpr int           SZINT      = sizeof(long long);  // 8
+        static constexpr std::size_t   MAXSIZE    =
+            static_cast<std::size_t>(std::numeric_limits<int>::max());
+        // LUAI_MAXALIGN on 64-bit platforms is 8 (largest of double/long/ptr).
+        static constexpr int           DFLT_ALIGN = sizeof(void*) > sizeof(double)
+                                                    ? static_cast<int>(sizeof(void*))
+                                                    : static_cast<int>(sizeof(double));
+
+        // Native endianness: compile-time via C++20 std::endian.
+        constexpr bool native_is_little() noexcept
+        {
+            return std::endian::native == std::endian::little;
+        }
+
+        struct Header {
+            bool islittle;
+            int  maxalign;
+        };
+        inline void initheader(Header& h) noexcept
+        {
+            h.islittle  = native_is_little();
+            h.maxalign  = 1;
+        }
+
+        enum class KOption {
+            Kint, Kuint, Kfloat, Knumber, Kdouble,
+            Kchar, Kstring, Kzstr, Kpadding, Kpaddalign, Knop
+        };
+
+        // Throw a format-level error (arg #1 is always the format string for
+        // these). All pack/unpack/packsize format errors are arg-1 errors.
+        [[noreturn]] static void fmt_error(const std::string& msg)
+        {
+            throw LuaError("bad argument #1 to 'pack' (" + msg + ")", 0);
+        }
+        // Same, but for a different function name (unpack/packsize).
+        [[noreturn]] static void fmt_error(const char* fn, const std::string& msg)
+        {
+            throw LuaError(std::string("bad argument #1 to '") + fn +
+                           "' (" + msg + ")", 0);
+        }
+
+        // Parse optional decimal digits with overflow guard. `i` is advanced
+        // past consumed digits. Returns `df` if no digits present.
+        static int getnum(const std::string& fmt, std::size_t& i, int df)
+        {
+            auto is_digit = [](char c) { return '0' <= c && c <= '9'; };
+            if (i >= fmt.size() || !is_digit(fmt[i])) return df;
+            int a = 0;
+            do {
+                a = a * 10 + (fmt[i] - '0');
+                ++i;
+            } while (i < fmt.size() && is_digit(fmt[i]) &&
+                     a <= static_cast<int>((MAXSIZE - 9) / 10));
+            return a;
+        }
+
+        // getnum + range check [1, MAXINTSIZE]. Used by i/I/s/!.
+        static int getnumlimit(Header& h, const std::string& fmt,
+                               std::size_t& i, int df, const char* fn)
+        {
+            (void)h;
+            int sz = getnum(fmt, i, df);
+            if (sz > MAXINTSIZE || sz <= 0)
+                fmt_error(fn, "integral size (" + std::to_string(sz) +
+                          ") out of limits [1," + std::to_string(MAXINTSIZE) + "]");
+            return sz;
+        }
+
+        // The directive dispatch. Returns the option kind and sets *psize.
+        // Advances `i` past the directive char AND any trailing digits.
+        // May mutate h (for <, >, =, !).
+        static KOption getoption(Header& h, const std::string& fmt,
+                                 std::size_t& i, int* psize, const char* fn)
+        {
+            if (i >= fmt.size()) fmt_error(fn, "invalid format");
+            char opt = fmt[i++];
+            switch (opt) {
+            case 'b': *psize = sizeof(char);            return KOption::Kint;
+            case 'B': *psize = sizeof(char);            return KOption::Kuint;
+            case 'h': *psize = sizeof(short);           return KOption::Kint;
+            case 'H': *psize = sizeof(short);           return KOption::Kuint;
+            case 'l': *psize = sizeof(long);            return KOption::Kint;
+            case 'L': *psize = sizeof(long);            return KOption::Kuint;
+            case 'j': *psize = sizeof(long long);       return KOption::Kint;
+            case 'J': *psize = sizeof(long long);       return KOption::Kuint;
+            case 'T': *psize = sizeof(std::size_t);     return KOption::Kuint;
+            case 'f': *psize = sizeof(float);           return KOption::Kfloat;
+            case 'd': *psize = sizeof(double);          return KOption::Kdouble;
+            // lua_Number is double for yueshi -> 'n' == 'd'.
+            case 'n': *psize = sizeof(double);          return KOption::Knumber;
+            case 'i': *psize = getnumlimit(h, fmt, i, sizeof(int),       fn); return KOption::Kint;
+            case 'I': *psize = getnumlimit(h, fmt, i, sizeof(int),       fn); return KOption::Kuint;
+            case 's': *psize = getnumlimit(h, fmt, i, sizeof(std::size_t), fn); return KOption::Kstring;
+            case 'c': {
+                int sz = getnum(fmt, i, -1);
+                if (sz == -1)
+                    fmt_error(fn, "missing size for format option 'c'");
+                *psize = sz;
+                return KOption::Kchar;
+            }
+            case 'z': *psize = 0;  return KOption::Kzstr;
+            case 'x': *psize = 1;  return KOption::Kpadding;
+            case 'X': *psize = 0;  return KOption::Kpaddalign;
+            case ' ': *psize = 0;  return KOption::Knop;
+            case '<': h.islittle = true;                 *psize = 0; return KOption::Knop;
+            case '>': h.islittle = false;                *psize = 0; return KOption::Knop;
+            case '=': h.islittle = native_is_little();   *psize = 0; return KOption::Knop;
+            case '!': h.maxalign = getnumlimit(h, fmt, i, DFLT_ALIGN, fn);
+                      *psize = 0; return KOption::Knop;
+            default:
+                fmt_error(fn, "invalid format option '" + std::string(1, opt) + "'");
+            }
+        }
+
+        // Wraps getoption: handles 'X' lookahead, computes ntoalign (pad bytes
+        // to insert BEFORE this option to reach the required alignment).
+        static KOption getdetails(Header& h, std::size_t totalsize,
+                                  const std::string& fmt, std::size_t& i,
+                                  int* psize, int* ntoalign, const char* fn)
+        {
+            KOption opt = getoption(h, fmt, i, psize, fn);
+            int align = *psize;   // usually alignment follows size
+            if (opt == KOption::Kpaddalign) {
+                // 'X' peeks the NEXT option's size as its alignment target.
+                if (i >= fmt.size())
+                    fmt_error(fn, "invalid next option for option 'X'");
+                KOption next = getoption(h, fmt, i, &align, fn);
+                if (next == KOption::Kchar || align == 0)
+                    fmt_error(fn, "invalid next option for option 'X'");
+            }
+            if (align <= 1 || opt == KOption::Kchar) {
+                *ntoalign = 0;   // 'c' is never aligned; size<=1 needs none
+            } else {
+                if (align > h.maxalign) align = h.maxalign;
+                if ((align & (align - 1)) != 0)
+                    fmt_error(fn, "format asks for alignment not power of 2");
+                *ntoalign = (align - static_cast<int>(totalsize &
+                            static_cast<std::size_t>(align - 1))) & (align - 1);
+            }
+            return opt;
+        }
+
+        // Write an integer as `size` bytes into `buf`, little or big endian.
+        // `neg` triggers sign-extension (0xFF fill) for size > SZINT.
+        static void packint(std::string& buf, unsigned long long n,
+                            bool islittle, int size, bool neg)
+        {
+            std::size_t p = buf.size();
+            buf.append(static_cast<std::size_t>(size), '\0');
+            char* b = &buf[p];
+            b[islittle ? 0 : size - 1] = static_cast<char>(n & MC);
+            for (int k = 1; k < size; ++k) {
+                n >>= NB;
+                b[islittle ? k : size - 1 - k] = static_cast<char>(n & MC);
+            }
+            if (neg && size > SZINT) {
+                for (int k = SZINT; k < size; ++k)
+                    b[islittle ? k : size - 1 - k] = static_cast<char>(MC);
+            }
+        }
+
+        // Copy `size` bytes from src to dest, byte-reversing if the target
+        // endianness differs from native. Used for float/double.
+        static void copywithendian(std::string& buf, const char* src,
+                                   int size, bool islittle)
+        {
+            std::size_t p = buf.size();
+            buf.append(static_cast<std::size_t>(size), '\0');
+            char* dest = &buf[p];
+            if (islittle == native_is_little()) {
+                std::memcpy(dest, src, static_cast<std::size_t>(size));
+            } else {
+                for (int k = 0; k < size; ++k)
+                    dest[size - 1 - k] = src[k];
+            }
+        }
+
+        // Read `size` bytes as an integer (signed or unsigned). Three
+        // regimes: size<SZINT sign-extends; size==SZINT passthrough;
+        // size>SZINT validates that high bytes are canonical sign-extension.
+        static long long unpackint(const char* str, bool islittle,
+                                   int size, bool issigned, const char* fn)
+        {
+            unsigned long long res = 0;
+            int limit = (size <= SZINT) ? size : SZINT;
+            for (int k = limit - 1; k >= 0; --k) {
+                res <<= NB;
+                res |= static_cast<unsigned long long>(
+                    static_cast<unsigned char>(str[islittle ? k : size - 1 - k]));
+            }
+            if (size < SZINT) {
+                if (issigned) {
+                    unsigned long long mask =
+                        static_cast<unsigned long long>(1) << (size * NB - 1);
+                    res = (res ^ mask) - mask;
+                }
+            } else if (size > SZINT) {
+                unsigned char mask =
+                    (!issigned || static_cast<long long>(res) >= 0) ? 0 : MC;
+                for (int k = limit; k < size; ++k) {
+                    if (static_cast<unsigned char>(
+                            str[islittle ? k : size - 1 - k]) != mask)
+                        fmt_error(fn, std::to_string(size) +
+                                  "-byte integer does not fit into Lua Integer");
+                }
+            }
+            return static_cast<long long>(res);
+        }
+
+        // 1-based position resolver for unpack's optional `pos` arg.
+        // pos>0 -> pos; pos==0 -> 1; pos<-len -> 1; else len+pos+1.
+        static std::size_t posrelatI(long long pos, std::size_t len) noexcept
+        {
+            if (pos > 0) return static_cast<std::size_t>(pos);
+            if (pos == 0) return 1;
+            if (pos < -static_cast<long long>(len)) return 1;
+            return len + static_cast<std::size_t>(pos) + 1;
+        }
+
+        // Coerce an argument to a (Lua) integer for pack's Kint/Kuint cases.
+        // Accepts ints and integral-valued floats; throws on bad type/range.
+        static long long int_value(const ValueVec& args, std::size_t idx,
+                                   const char* fn)
+        {
+            if (idx >= args.size())
+                throw LuaError(std::string("bad argument #") +
+                               std::to_string(idx + 1) + " to '" + fn +
+                               "' (number expected)", 0);
+            const LuaValue& v = args[idx];
+            if (v.is_int()) return v.as_int();
+            if (v.is_flt()) {
+                double f = v.as_flt();
+                if (std::floor(f) == f &&
+                    f >= static_cast<double>(std::numeric_limits<long long>::min()) &&
+                    f <= static_cast<double>(std::numeric_limits<long long>::max()))
+                    return static_cast<long long>(f);
+            }
+            throw LuaError(std::string("bad argument #") +
+                           std::to_string(idx + 1) + " to '" + fn +
+                           "' (number has no integer representation)", 0);
+        }
+
+        // Coerce an argument to a double for pack's Kfloat/Kdouble/Knumber.
+        static double num_value(const ValueVec& args, std::size_t idx,
+                                const char* fn)
+        {
+            if (idx >= args.size() || !args[idx].is_number())
+                throw LuaError(std::string("bad argument #") +
+                               std::to_string(idx + 1) + " to '" + fn +
+                               "' (number expected)", 0);
+            return to_double(args[idx]);
+        }
+
+        // Fetch a string argument (1-based Lua arg index).
+        static const std::string& str_value(const ValueVec& args,
+                                            std::size_t idx, const char* fn)
+        {
+            if (idx >= args.size() || !args[idx].is_str())
+                throw LuaError(std::string("bad argument #") +
+                               std::to_string(idx + 1) + " to '" + fn +
+                               "' (string expected)", 0);
+            return args[idx].as_str()->data;
+        }
+
+        } // namespace packimpl
+
         // -------------------------------------------------------------------
-        // pack / unpack / packsize — deferred stubs
+        // string.packsize(fmt)
         // -------------------------------------------------------------------
-        ValueVec b_pack(Evaluator&, ValueVec) { throw LuaError("string.pack: not yet implemented", 0); }
-        ValueVec b_unpack(Evaluator&, ValueVec) { throw LuaError("string.unpack: not yet implemented", 0); }
-        ValueVec b_packsize(Evaluator&, ValueVec) { throw LuaError("string.packsize: not yet implemented", 0); }
+        ValueVec b_packsize(Evaluator&, ValueVec args)
+        {
+            if (args.empty() || !args[0].is_str())
+                throw LuaError("bad argument #1 to 'packsize' (string expected)", 0);
+            const std::string& fmt = args[0].as_str()->data;
+            using namespace packimpl;
+            Header h; initheader(h);
+            std::size_t totalsize = 0;
+            std::size_t i = 0;
+            while (i < fmt.size()) {
+                int size = 0, ntoalign = 0;
+                KOption opt = getdetails(h, totalsize, fmt, i, &size, &ntoalign, "packsize");
+                if (opt == KOption::Kstring || opt == KOption::Kzstr)
+                    fmt_error("packsize", "variable-length format");
+                std::size_t sz = static_cast<std::size_t>(size) +
+                                 static_cast<std::size_t>(ntoalign);
+                if (totalsize > MAXSIZE - sz)
+                    fmt_error("packsize", "format result too large");
+                totalsize += sz;
+            }
+            return {LuaValue::integer(static_cast<long long>(totalsize))};
+        }
+
+        // -------------------------------------------------------------------
+        // string.pack(fmt, ...)
+        // -------------------------------------------------------------------
+        ValueVec b_pack(Evaluator& ev, ValueVec args)
+        {
+            if (args.empty() || !args[0].is_str())
+                throw LuaError("bad argument #1 to 'pack' (string expected)", 0);
+            const std::string& fmt = args[0].as_str()->data;
+            using namespace packimpl;
+            Header h; initheader(h);
+            std::string buf;
+            std::size_t arg_idx = 1;   // args[1] is the first value
+            std::size_t i = 0;
+            while (i < fmt.size()) {
+                int size = 0, ntoalign = 0;
+                KOption opt = getdetails(h, buf.size(), fmt, i, &size, &ntoalign, "pack");
+                // Emit alignment pad bytes (LUAL_PACKPADBYTE == 0).
+                buf.append(static_cast<std::size_t>(ntoalign), '\0');
+                switch (opt) {
+                case KOption::Kint: {
+                    long long n = int_value(args, arg_idx, "pack");
+                    if (size < SZINT) {
+                        long long lim = static_cast<long long>(1) << (size * NB - 1);
+                        if (!(-lim <= n && n < lim))
+                            throw LuaError("bad argument #" + std::to_string(arg_idx + 1) +
+                                           " to 'pack' (integer overflow)", 0);
+                    }
+                    packint(buf, static_cast<unsigned long long>(n),
+                            h.islittle, size, n < 0);
+                    ++arg_idx;
+                    break;
+                }
+                case KOption::Kuint: {
+                    long long n = int_value(args, arg_idx, "pack");
+                    if (size < SZINT) {
+                        unsigned long long lim =
+                            (static_cast<unsigned long long>(1) << (size * NB));
+                        if (!(static_cast<unsigned long long>(n) < lim))
+                            throw LuaError("bad argument #" + std::to_string(arg_idx + 1) +
+                                           " to 'pack' (unsigned overflow)", 0);
+                    }
+                    packint(buf, static_cast<unsigned long long>(n),
+                            h.islittle, size, false);
+                    ++arg_idx;
+                    break;
+                }
+                case KOption::Kfloat: {
+                    float f = static_cast<float>(num_value(args, arg_idx, "pack"));
+                    copywithendian(buf, reinterpret_cast<const char*>(&f),
+                                   sizeof(f), h.islittle);
+                    ++arg_idx;
+                    break;
+                }
+                case KOption::Knumber:
+                case KOption::Kdouble: {
+                    double d = num_value(args, arg_idx, "pack");
+                    copywithendian(buf, reinterpret_cast<const char*>(&d),
+                                   sizeof(d), h.islittle);
+                    ++arg_idx;
+                    break;
+                }
+                case KOption::Kchar: {
+                    const std::string& s = str_value(args, arg_idx, "pack");
+                    if (s.size() > static_cast<std::size_t>(size))
+                        throw LuaError("bad argument #" + std::to_string(arg_idx + 1) +
+                                       " to 'pack' (string longer than given size)", 0);
+                    buf.append(s);
+                    // Zero-pad to fixed length.
+                    buf.append(static_cast<std::size_t>(size) - s.size(), '\0');
+                    ++arg_idx;
+                    break;
+                }
+                case KOption::Kstring: {
+                    const std::string& s = str_value(args, arg_idx, "pack");
+                    // Check the length fits in the size-prefix's range.
+                    // (size * NB can be >= 64; shifting by 64 is UB, so guard.)
+                    int bits = size * NB;
+                    unsigned long long max_len =
+                        (bits >= 64) ? ~0ULL
+                                     : ((static_cast<unsigned long long>(1) << bits) - 1);
+                    if (s.size() > max_len)
+                        throw LuaError("bad argument #" + std::to_string(arg_idx + 1) +
+                                       " to 'pack' (string length does not fit in given size)", 0);
+                    // Length prefix (always unsigned, no overflow check).
+                    packint(buf, static_cast<unsigned long long>(s.size()),
+                            h.islittle, size, false);
+                    buf.append(s);
+                    ++arg_idx;
+                    break;
+                }
+                case KOption::Kzstr: {
+                    const std::string& s = str_value(args, arg_idx, "pack");
+                    if (s.find('\0') != std::string::npos)
+                        throw LuaError("bad argument #" + std::to_string(arg_idx + 1) +
+                                       " to 'pack' (string contains zeros)", 0);
+                    buf.append(s);
+                    buf.push_back('\0');
+                    ++arg_idx;
+                    break;
+                }
+                case KOption::Kpadding:
+                    // One zero byte (emitted below via the size==1 path).
+                    buf.push_back('\0');
+                    break;
+                case KOption::Kpaddalign:
+                    // ntoalign pad bytes already emitted above; Kpaddalign
+                    // itself contributes no further bytes.
+                    break;
+                case KOption::Knop:
+                    break;
+                }
+            }
+            return {mk_str(ev, std::move(buf))};
+        }
+
+        // -------------------------------------------------------------------
+        // string.unpack(fmt, s [, pos])
+        // -------------------------------------------------------------------
+        ValueVec b_unpack(Evaluator& ev, ValueVec args)
+        {
+            if (args.empty() || !args[0].is_str())
+                throw LuaError("bad argument #1 to 'unpack' (string expected)", 0);
+            if (args.size() < 2 || !args[1].is_str())
+                throw LuaError("bad argument #2 to 'unpack' (string expected)", 0);
+            const std::string& fmt  = args[0].as_str()->data;
+            const std::string& data = args[1].as_str()->data;
+            using namespace packimpl;
+            Header h; initheader(h);
+            std::size_t ld = data.size();
+            long long parg = (args.size() >= 3 && args[2].is_number())
+                             ? static_cast<long long>(to_double(args[2])) : 1;
+            std::size_t pos = posrelatI(parg, ld) - 1;
+            if (pos > ld)
+                throw LuaError("bad argument #3 to 'unpack' (initial position out of string)", 0);
+            ValueVec out;
+            std::size_t i = 0;
+            while (i < fmt.size()) {
+                int size = 0, ntoalign = 0;
+                KOption opt = getdetails(h, pos, fmt, i, &size, &ntoalign, "unpack");
+                // Bounds: ntoalign + size must fit in the remaining data.
+                if (static_cast<std::size_t>(ntoalign) + static_cast<std::size_t>(size) > ld - pos)
+                    throw LuaError("bad argument #2 to 'unpack' (data string too short)", 0);
+                pos += static_cast<std::size_t>(ntoalign);
+                const char* d = data.data() + pos;
+                switch (opt) {
+                case KOption::Kint:
+                    out.push_back(LuaValue::integer(
+                        unpackint(d, h.islittle, size, true, "unpack")));
+                    break;
+                case KOption::Kuint:
+                    out.push_back(LuaValue::integer(
+                        unpackint(d, h.islittle, size, false, "unpack")));
+                    break;
+                case KOption::Kfloat: {
+                    float f;
+                    if (h.islittle == native_is_little())
+                        std::memcpy(&f, d, sizeof(f));
+                    else
+                        for (int k = 0; k < static_cast<int>(sizeof(f)); ++k)
+                            (reinterpret_cast<char*>(&f))[sizeof(f) - 1 - k] = d[k];
+                    out.push_back(LuaValue::flt(static_cast<double>(f)));
+                    break;
+                }
+                case KOption::Knumber:
+                case KOption::Kdouble: {
+                    double dbl;
+                    if (h.islittle == native_is_little())
+                        std::memcpy(&dbl, d, sizeof(dbl));
+                    else
+                        for (int k = 0; k < static_cast<int>(sizeof(dbl)); ++k)
+                            (reinterpret_cast<char*>(&dbl))[sizeof(dbl) - 1 - k] = d[k];
+                    out.push_back(LuaValue::flt(dbl));
+                    break;
+                }
+                case KOption::Kchar:
+                    out.push_back(mk_str(ev, std::string(d, static_cast<std::size_t>(size))));
+                    break;
+                case KOption::Kstring: {
+                    unsigned long long len = static_cast<unsigned long long>(
+                        unpackint(d, h.islittle, size, false, "unpack"));
+                    if (static_cast<std::size_t>(size) + len > ld - pos)
+                        throw LuaError("bad argument #2 to 'unpack' (data string too short)", 0);
+                    out.push_back(mk_str(ev, std::string(d + size, static_cast<std::size_t>(len))));
+                    pos += static_cast<std::size_t>(len);
+                    break;
+                }
+                case KOption::Kzstr: {
+                    std::size_t z = pos;
+                    while (z < ld && data[z] != '\0') ++z;
+                    if (z >= ld)
+                        throw LuaError("bad argument #2 to 'unpack' (unfinished string for format 'z')", 0);
+                    out.push_back(mk_str(ev, std::string(data, pos, z - pos)));
+                    pos = z + 1;   // skip the \0
+                    break;
+                }
+                case KOption::Kpadding:
+                case KOption::Kpaddalign:
+                case KOption::Knop:
+                    break;
+                }
+                pos += static_cast<std::size_t>(size);
+            }
+            // Final position (1-based) is the last return value.
+            out.push_back(LuaValue::integer(static_cast<long long>(pos) + 1));
+            return out;
+        }
 
         } // namespace strlib
 

@@ -36,10 +36,11 @@ xorshift64* PRNG). Short strings are interned (GC-managed) and a per-type
 string metatable enables `("hi"):upper()`. Also includes a minimal standard
 library (`print`/`type`/`tostring`/`tonumber`/`error`/`assert`/`pcall`/
 `xpcall`/`ipairs`/`pairs`/`next`/`select`/`rawget`/`rawset`/`rawequal`/
-`rawlen`). It passes **159/159** evaluator unit tests (10 710 assertions),
-a **15/15** GC unit suite (53 assertions), and a **20/20** pattern engine
-suite (107 assertions), all green under ASan + UBSan with leak detection.
-The remaining standard library (`string.pack`/`unpack`/`packsize`, `io`/`os`,
+`rawlen`). It passes **171/171** evaluator unit tests (11 940 assertions),
+a **15/15** GC unit suite (53 assertions), a **20/20** pattern engine
+suite (107 assertions), and a **tpack.lua** corpus gate (~420 runtime
+assertions), all green under ASan + UBSan with leak detection.
+The remaining standard library (`io`/`os`,
 `coroutine`/`debug`, `_ENV`/`load`/`require`) is the next milestone.
 See [TODO.md](TODO.md) for the full roadmap.
 

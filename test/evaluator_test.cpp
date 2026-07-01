@@ -2032,6 +2032,278 @@ TEST_CASE("evaluator: math.randomseed — reproducibility across reseed")
     CHECK(e != a);
 }
 
+// =====================================================================
+// M3.2.5: string.pack / unpack / packsize
+// =====================================================================
+
+TEST_CASE("evaluator: string.pack/unpack basic round-trip")
+{
+    EvalRig g;
+    // i4 round-trip
+    CHECK(as_int(g.run_scalar(
+        "return string.unpack('i4', string.pack('i4', 2001))")) == 2001);
+    // j (lua_Integer) round-trip
+    CHECK(as_int(g.run_scalar(
+        "return string.unpack('>j', string.pack('>j', 9007199254740992))")) ==
+        9007199254740992LL);
+    // b/B byte round-trip
+    CHECK(as_int(g.run_scalar(
+        "return string.unpack('b', string.pack('b', -12))")) == -12);
+    CHECK(as_int(g.run_scalar(
+        "return string.unpack('B', string.pack('B', 255))")) == 255);
+    // double round-trip
+    CHECK(as_flt(g.run_scalar(
+        "return string.unpack('d', string.pack('d', 3.14159))")) ==
+        doctest::Approx(3.14159));
+}
+
+TEST_CASE("evaluator: string.pack endianness")
+{
+    EvalRig g;
+    // Little-endian i2 of 1 -> "\1\0"
+    CHECK(as_str(g.run_scalar("return string.pack('<i2', 1)")) ==
+        std::string("\1\0", 2));
+    // Big-endian i2 of 1 -> "\0\1"
+    CHECK(as_str(g.run_scalar("return string.pack('>i2', 1)")) ==
+        std::string("\0\1", 2));
+    // Native endianness detectable: pack('i2', 1) matches one of them
+    auto native = as_str(g.run_scalar("return string.pack('i2', 1)"));
+    bool is_little = (native == std::string("\1\0", 2));
+    bool is_big = (native == std::string("\0\1", 2));
+    CHECK(is_little != is_big);   // exactly one must be true
+}
+
+TEST_CASE("evaluator: string.pack/unpack mixed endian")
+{
+    EvalRig g;
+    // ">i2 <i2" packs first big, second little
+    // 10 big-endian i2 = \0\x0A, 20 little-endian i2 = \x14\0
+    CHECK(as_str(g.run_scalar("return string.pack('>i2 <i2', 10, 20)")) ==
+        std::string("\x00\x0A\x14\x00", 4));
+    // Unpack the mixed format: <i2 >i2 of "\x0A\x00\x00\x14" = 10, 20
+    auto r = g.run("return string.unpack('<i2 >i2', '\\10\\0\\0\\20')");
+    REQUIRE(r.size() == 3);   // 2 values + pos
+    CHECK(as_int(r[0]) == 10);
+    CHECK(as_int(r[1]) == 20);
+    CHECK(as_int(r[2]) == 5);   // 1-based pos after 4 bytes
+}
+
+TEST_CASE("evaluator: string.unpack sign extension")
+{
+    EvalRig g;
+    // i1 of \255 = -1
+    CHECK(as_int(g.run_scalar("return string.unpack('<i1', '\\255')")) == -1);
+    // i2 of \255\255 = -1
+    CHECK(as_int(g.run_scalar("return string.unpack('<i2', '\\255\\255')")) == -1);
+    // i2 of \0\255 (big-endian) = -1
+    CHECK(as_int(g.run_scalar("return string.unpack('>i2', '\\0\\255')")) == 255);
+    // I2 (unsigned) of \255\255 = 65535
+    CHECK(as_int(g.run_scalar("return string.unpack('<I2', '\\255\\255')")) == 65535);
+    // i1 of \240 = -16
+    CHECK(as_int(g.run_scalar("return string.unpack('<i1', '\\240')")) == -16);
+}
+
+TEST_CASE("evaluator: string.packsize basics")
+{
+    EvalRig g;
+    CHECK(as_int(g.run_scalar("return string.packsize('i4')")) == 4);
+    CHECK(as_int(g.run_scalar("return string.packsize('j')")) == 8);
+    CHECK(as_int(g.run_scalar("return string.packsize('bBhHiIjJlL')")) ==
+        1+1+2+2+4+4+8+8+8+8);
+    CHECK(as_int(g.run_scalar("return string.packsize('f')")) == 4);
+    CHECK(as_int(g.run_scalar("return string.packsize('d')")) == 8);
+    CHECK(as_int(g.run_scalar("return string.packsize('c10')")) == 10);
+    // x is 1 padding byte
+    CHECK(as_int(g.run_scalar("return string.packsize('xi4')")) == 5);
+    // Alignment
+    CHECK(as_int(g.run_scalar("return string.packsize('!4 i4 i4')")) == 8);
+    CHECK(as_int(g.run_scalar("return string.packsize('!4 i4 i2 i4')")) == 12);
+}
+
+TEST_CASE("evaluator: string.packsize matches #pack for fixed formats")
+{
+    EvalRig g;
+    // Each pair: (format, full pack call). Verify packsize matches #pack.
+    struct Case { const char* fmt; const char* pack_call; };
+    Case cases[] = {
+        {"i4",            "return #string.pack('i4', 0)"},
+        {">j",            "return #string.pack('>j', 0)"},
+        {"<bBhH",         "return #string.pack('<bBhH', 0, 0, 0, 0)"},
+        {"ddd",           "return #string.pack('ddd', 0, 0, 0)"},
+        {"c8",            "return #string.pack('c8', '')"},
+        {"xi4xi4",        "return #string.pack('xi4xi4', 0, 0)"},
+        {"!8 i4 i8 c1",   "return #string.pack('!8 i4 i8 c1', 0, 0, 'x')"},
+    };
+    for (auto& c : cases) {
+        std::string sz = std::string("return string.packsize('") + c.fmt + "')";
+        CHECK_MESSAGE(
+            as_int(g.run_scalar(c.pack_call)) == as_int(g.run_scalar(sz)),
+            "fmt: " << c.fmt);
+    }
+}
+
+TEST_CASE("evaluator: string.pack float/double")
+{
+    EvalRig g;
+    // float (4 bytes)
+    CHECK(as_flt(g.run_scalar(
+        "return string.unpack('<f', string.pack('<f', 1.5))")) ==
+        doctest::Approx(1.5));
+    // double (8 bytes)
+    CHECK(as_flt(g.run_scalar(
+        "return string.unpack('<d', string.pack('<d', 3.141592653589793))")) ==
+        doctest::Approx(3.141592653589793));
+    // n (native number == double for us)
+    CHECK(as_flt(g.run_scalar(
+        "return string.unpack('n', string.pack('n', 2.718281828459045))")) ==
+        doctest::Approx(2.718281828459045));
+    // Byte reversal: pack(">f", n) == pack("<f", n):reverse()
+    CHECK(as_bool(g.run_scalar(
+        "return string.pack('>f', 24.0) == string.pack('<f', 24.0):reverse()")) == true);
+    CHECK(as_bool(g.run_scalar(
+        "return string.pack('>d', 24.0) == string.pack('<d', 24.0):reverse()")) == true);
+}
+
+TEST_CASE("evaluator: string.pack/unpack strings")
+{
+    EvalRig g;
+    // z (zero-terminated)
+    CHECK(as_str(g.run_scalar(
+        "return string.unpack('z', string.pack('z', 'hello') .. 'trailing')")) ==
+        "hello");
+    // s (length-prefixed)
+    CHECK(as_str(g.run_scalar(
+        "return string.unpack('s', string.pack('s', 'world'))")) == "world");
+    // s1 (1-byte length prefix)
+    CHECK(as_str(g.run_scalar(
+        "return string.unpack('s1', string.pack('s1', 'ab'))")) == "ab");
+    // cN (fixed-length)
+    CHECK(as_str(g.run_scalar(
+        "return string.unpack('c5', string.pack('c5', 'ab'))")) ==
+        std::string("ab\0\0\0", 5));
+    // c0 (empty)
+    CHECK(as_str(g.run_scalar(
+        "return string.unpack('c0', '')")) == "");
+    // c8 pads with zeros
+    CHECK(as_str(g.run_scalar(
+        "return string.unpack('c8', string.pack('c8', 'abcd'))")) ==
+        std::string("abcd\0\0\0\0", 8));
+}
+
+TEST_CASE("evaluator: string.pack/unpack alignment")
+{
+    EvalRig g;
+    // No alignment by default: " < i1 i2 " -> 3 bytes
+    CHECK(as_str(g.run_scalar("return string.pack(' < i1 i2 ', 2, 3)")) ==
+        std::string("\2\3\0", 3));
+    // !8 with b, Xh, i4, i8, c1 — the tricky composite alignment from tpack.lua
+    auto x = as_str(g.run_scalar(
+        "return string.pack('>!8 b Xh i4 i8 c1 Xi8', -12, 100, 200, '\\236')"));
+    CHECK(x.size() == 24);
+    // Unpack with the mirror format
+    auto r = g.run(
+        "return string.unpack('>!8 c1 Xh i4 i8 b Xi8 XI XH', '"
+        "\\244\\0\\0\\0\\0\\0\\0\\100\\0\\0\\0\\0\\0\\0\\0\\200\\236"
+        "\\0\\0\\0\\0\\0\\0\\0')");
+    REQUIRE(r.size() == 5);   // 4 values + pos
+    CHECK(as_str(r[0]) == std::string("\xf4", 1));   // Lua \244 = 0xF4
+    CHECK(as_int(r[1]) == 100);
+    CHECK(as_int(r[2]) == 200);
+    CHECK(as_int(r[3]) == -20);
+    CHECK(as_int(r[4]) == 25);   // pos (1-based) = 24 + 1
+}
+
+TEST_CASE("evaluator: string.pack/unpack with pos argument")
+{
+    EvalRig g;
+    // Default pos = 1
+    auto r = g.run("return string.unpack('i4i4', string.pack('i4i4', 10, 20))");
+    REQUIRE(r.size() == 3);
+    CHECK(as_int(r[0]) == 10);
+    CHECK(as_int(r[1]) == 20);
+    CHECK(as_int(r[2]) == 9);   // 1-based pos after 8 bytes
+    // Explicit pos
+    r = g.run("return string.unpack('i4', '\\1\\0\\0\\0\\2\\0\\0\\0', 5)");
+    REQUIRE(r.size() == 2);
+    CHECK(as_int(r[0]) == 2);
+    CHECK(as_int(r[1]) == 9);
+    // Negative pos
+    r = g.run("return string.unpack('i4', '\\1\\0\\0\\0\\2\\0\\0\\0', -4)");
+    REQUIRE(r.size() == 2);
+    CHECK(as_int(r[0]) == 2);
+    CHECK(as_int(r[1]) == 9);
+}
+
+TEST_CASE("evaluator: string.pack error cases")
+{
+    EvalRig g;
+    auto run_pcall = [&](const std::string& code) -> std::string {
+        auto r = g.run(code);
+        REQUIRE(r.size() >= 2);
+        REQUIRE(as_bool(r[0]) == false);
+        REQUIRE(r[1].is_str());
+        return r[1].as_str()->data;
+    };
+    // packsize on variable-length format
+    CHECK(run_pcall(
+        "local ok, err = pcall(string.packsize, 's'); return ok, tostring(err)")
+        .find("variable-length format") != std::string::npos);
+    // missing size for c
+    CHECK(run_pcall(
+        "local ok, err = pcall(string.packsize, 'c'); return ok, tostring(err)")
+        .find("missing size") != std::string::npos);
+    // integer overflow (signed byte)
+    CHECK(run_pcall(
+        "local ok, err = pcall(string.pack, 'b', 200); return ok, tostring(err)")
+        .find("integer overflow") != std::string::npos);
+    // unsigned overflow
+    CHECK(run_pcall(
+        "local ok, err = pcall(string.pack, 'B', -1); return ok, tostring(err)")
+        .find("unsigned overflow") != std::string::npos);
+    // invalid format option
+    CHECK(run_pcall(
+        "local ok, err = pcall(string.packsize, 'r'); return ok, tostring(err)")
+        .find("invalid format option") != std::string::npos);
+    // string longer than c size
+    CHECK(run_pcall(
+        "local ok, err = pcall(string.pack, 'c3', '1234'); return ok, tostring(err)")
+        .find("longer than") != std::string::npos);
+    // data string too short
+    CHECK(run_pcall(
+        "local ok, err = pcall(string.unpack, 'i4', 'ab'); return ok, tostring(err)")
+        .find("too short") != std::string::npos);
+    // invalid next option for X
+    CHECK(run_pcall(
+        "local ok, err = pcall(string.packsize, 'X'); return ok, tostring(err)")
+        .find("invalid next option") != std::string::npos);
+    // not power of 2 (i3 has size 3)
+    CHECK(run_pcall(
+        "local ok, err = pcall(string.packsize, '!4i3'); return ok, tostring(err)")
+        .find("not power of 2") != std::string::npos);
+    // 16-byte integer overflow on unpack: non-canonical bytes (0x03 in the
+    // high bytes of a positive value; 0x03 != 0x00 sign-extension).
+    CHECK(run_pcall(
+        "local ok, err = pcall(string.unpack, 'i16', string.rep('\\3', 16)); "
+        "return ok, tostring(err)")
+        .find("does not fit") != std::string::npos);
+}
+
+TEST_CASE("evaluator: string.pack oversize integer round-trip")
+{
+    EvalRig g;
+    // size > SZINT (8): up to 16 bytes with canonical sign extension.
+    // Positive value, high bytes are 0x00.
+    CHECK(as_int(g.run_scalar(
+        "return string.unpack('<i9', string.pack('<i9', 42))")) == 42);
+    // Negative value, high bytes are 0xFF.
+    CHECK(as_int(g.run_scalar(
+        "return string.unpack('<i10', string.pack('<i10', -1))")) == -1);
+    // maxinteger as i16
+    CHECK(as_int(g.run_scalar(
+        "return string.unpack('<j', string.pack('<j', math.maxinteger))")) ==
+        std::numeric_limits<long long>::max());
+}
+
 
 
 

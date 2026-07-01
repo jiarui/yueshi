@@ -248,18 +248,23 @@ Tokenizer::Tokenizer(std::string input)
                     m_token_buf.id = static_cast<Token::TokenIDType>(TokenID::TK_FLT);
                     m_token_buf.info = dval;
                 } else {
-                    long long ivalue{};
-                    auto ret = std::from_chars(hfirst, last, ivalue, 16);
-                    // Lua re-reads an out-of-range hex integer as a float.
-                    if (ret.ec == std::errc::result_out_of_range) {
-                        double dval{};
-                        std::from_chars(hfirst, last, dval, std::chars_format::hex);
-                        m_token_buf.id = static_cast<Token::TokenIDType>(TokenID::TK_FLT);
-                        m_token_buf.info = dval;
-                    } else {
-                        m_token_buf.id = static_cast<Token::TokenIDType>(TokenID::TK_INT);
-                        m_token_buf.info = ivalue;
+                    // Hex integer (no dot, no exponent): Lua 5.4 says these
+                    // ALWAYS denote an integer value; on overflow they wrap
+                    // around (two's complement), they do NOT become floats.
+                    // std::from_chars does NOT wrap on overflow, so parse
+                    // manually, accumulating mod 2^64 to match Lua semantics.
+                    unsigned long long uval = 0;
+                    for (const char* p = hfirst; p < last; ++p) {
+                        char c = *p;
+                        unsigned digit;
+                        if (c >= '0' && c <= '9') digit = c - '0';
+                        else if (c >= 'a' && c <= 'f') digit = c - 'a' + 10;
+                        else if (c >= 'A' && c <= 'F') digit = c - 'A' + 10;
+                        else break;
+                        uval = uval * 16 + digit;
                     }
+                    m_token_buf.id = static_cast<Token::TokenIDType>(TokenID::TK_INT);
+                    m_token_buf.info = static_cast<long long>(uval);
                 }
             } else if (has_dot || has_exp) {
                 // Decimal float.

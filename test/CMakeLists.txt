@@ -93,6 +93,29 @@ target_include_directories(yueshi_lua_evaluator_test PRIVATE
 yueshi_test_enable_sanitizers(yueshi_lua_evaluator_test)
 add_test(NAME yueshi_lua_evaluator_test COMMAND yueshi_lua_evaluator_test)
 
+# string.pack/unpack/packsize corpus acceptance: run the official tpack.lua
+# end-to-end through the evaluator. High-leverage gate for M3.2.5 (~420
+# runtime assertions in a single file).
+add_executable(yueshi_lua_pack_corpus
+    pack_corpus.cpp
+    ../src/lua/evaluator.cpp
+    ../src/lua/strlib.cpp
+    ../src/lua/tablib.cpp
+    ../src/lua/mathlib.cpp
+    ../src/lua/pattern.cpp
+    ../src/lua/numops.cpp
+    ../src/lua/heap.cpp
+    ../src/lua/parser.cpp
+    ../src/lua/lex.cpp)
+target_link_libraries(yueshi_lua_pack_corpus PRIVATE peglib yueshi_test_main)
+target_include_directories(yueshi_lua_pack_corpus PRIVATE
+    ${doctest_include_dir}
+    ${CMAKE_SOURCE_DIR}/include)
+target_compile_definitions(yueshi_lua_pack_corpus PRIVATE
+    YUESHI_CORPUS_DIR="${CMAKE_SOURCE_DIR}/test/corpus/lua-5.4.8-tests")
+yueshi_test_enable_sanitizers(yueshi_lua_pack_corpus)
+add_test(NAME yueshi_lua_pack_corpus COMMAND yueshi_lua_pack_corpus)
+
 # Pattern engine unit tests: pure-C++ tests over std::string_view.
 add_executable(yueshi_lua_pattern_test
     pattern_test.cpp

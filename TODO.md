@@ -109,6 +109,33 @@ yueshi is a Lua 5.4 interpreter built on
     for-byte the same sequence).
   - Tests: evaluator 134→159 (+25 cases: 13 table + 12 math, +3 298
     assertions). All green under ASan + UBSan with leak detection.
+- **M3.2.5 `string.pack`/`unpack`/`packsize`** — the isolated mini-milestone.
+  Direct port of Lua 5.4's `lstrlib.c` pack machinery (~500 lines in
+  strlib.cpp). The 11-value `KOption` enum, `Header` (mutable `islittle`/
+  `maxalign` scanned left-to-right — NOT per-option), `getoption`/`getnum`/
+  `getnumlimit`/`getdetails` (handles `X` lookahead, alignment rounding,
+  power-of-2 check), `packint` (sign-extension for `size > SZINT`),
+  `unpackint` (three regimes: `size<SZINT` sign-extend, `size==SZINT`
+  passthrough, `size>SZINT` validate canonical sign-extension of high
+  bytes), `copywithendian` (float byte-reversal), `posrelatI` (1-based
+  position resolver with `pos==0`→1 and negative-from-end clipping).
+  `packsize` overflow guard: `totalsize <= MAXSIZE - size` where
+  `MAXSIZE == INT_MAX` (saturating add). 17 exact error strings matching
+  reference Lua (e.g. `"integral size (17) out of limits [1,16]"`,
+  `"9-byte integer does not fit into Lua Integer"`, `"format asks for
+  alignment not power of 2"`).
+  - **Bugs fixed during M3.2.5**:
+    (1) **Lexer: hex integer overflow wraps, not floats** — Lua 5.4 says
+    hex integer literals that overflow wrap (two's complement), they do
+    NOT become floats. The old code used `std::from_chars` which returns
+    `result_out_of_range` and leaves the value as 0. Fixed to manually
+    accumulate mod 2^64, matching Lua semantics.
+    (2) **strlib `int_arg` now accepts integral floats** — `2^3` produces
+    `8.0` (float, since `^` always returns float), and `string.rep(s, 8.0)`
+    was rejecting it. Lua 5.4 coerces integral floats for these positions.
+  - Tests: evaluator 159→171 (+12 cases, +1 230 assertions); new
+    `pack_corpus` target runs tpack.lua end-to-end (~420 runtime
+    assertions). 7 test targets, all green under ASan + UBSan.
 
 ## Phase 1 — Lexer (double-pass)
 
@@ -306,13 +333,6 @@ is independently shippable and adds its own test corpus file(s).
     (`"unfinished capture"`, `"malformed pattern (missing ']')"`, `"missing
     '[' after '%f' in pattern"`, etc.).
   - Unblocks corpus: `pm.lua`, `strings.lua`.
-- **M3.2.5 `string.pack` / `unpack` / `packsize`** (next) — the isolated
-  ~500-LOC mini-milestone. Currently stubbed in strlib.cpp; tpack.lua's ~150
-  self-contained assertions all gate on it. Endian/align/overflow and the
-  exact error strings (`"out of limits"`, `"invalid format option 'r'"`,
-  `"16-byte integer"`, etc.) are the bulk of the work. No other lib needs
-  it; can land cleanly between M3.2-3 and the higher-risk M3.5 refactor.
-  Unblocks corpus: `tpack.lua`.
 - **M3.4 `io` + `os` libraries** — needs a **file-handle / userdata** concept
   (a new `LuaValue` tag, or a `Table` with a hidden native pointer slot).
   - `io`: `write`/`read`/`open`/`close`/`lines`, plus `io.stdin`/`io.stdout`/
