@@ -2621,6 +2621,123 @@ TEST_CASE("evaluator: goto.lua errmsg patterns")
     CHECK(errmsg("goto l1; local aa; ::l1:: ::l2:: print(3)", "local 'aa'"));
 }
 
+// =====================================================================
+// M3.5 Part D: require / package
+// =====================================================================
+
+#ifndef YUESHI_CORPUS_DIR
+#define YUESHI_CORPUS_DIR "."
+#endif
+
+TEST_CASE("evaluator: package.loaded pre-seeded")
+{
+    EvalRig g;
+    CHECK(as_bool(g.run_scalar("return package.loaded.string == string")) == true);
+    CHECK(as_bool(g.run_scalar("return package.loaded.math == math")) == true);
+    CHECK(as_bool(g.run_scalar("return package.loaded.table == table")) == true);
+    CHECK(as_bool(g.run_scalar("return package.loaded._G == _G")) == true);
+}
+
+TEST_CASE("evaluator: require returns cached stdlib")
+{
+    EvalRig g;
+    CHECK(as_bool(g.run_scalar("return require('string') == string")) == true);
+    CHECK(as_bool(g.run_scalar("return require('math') == math")) == true);
+}
+
+TEST_CASE("evaluator: require loads Lua module from file")
+{
+    EvalRig g;
+    std::string dir = YUESHI_CORPUS_DIR "/require_test/?.lua";
+    // Set package.path, then require a module.
+    g.run("package.path = '" + dir + "'");
+    auto r = g.run("local m = require('mod_simple'); return m.hello");
+    CHECK(r.size() >= 1);
+    CHECK(as_str(r[0]) == "world");
+}
+
+TEST_CASE("evaluator: require caches loaded modules")
+{
+    EvalRig g;
+    std::string dir = YUESHI_CORPUS_DIR "/require_test/?.lua";
+    g.run("package.path = '" + dir + "'");
+    CHECK(as_bool(g.run_scalar(
+        "local m1 = require('mod_simple'); "
+        "local m2 = require('mod_simple'); "
+        "return m1 == m2")) == true);
+}
+
+TEST_CASE("evaluator: require returns true for module returning nothing")
+{
+    EvalRig g;
+    std::string dir = YUESHI_CORPUS_DIR "/require_test/?.lua";
+    g.run("package.path = '" + dir + "'");
+    CHECK(as_bool(g.run_scalar("return require('mod_nothing')")) == true);
+}
+
+TEST_CASE("evaluator: require self-assign via package.loaded")
+{
+    EvalRig g;
+    std::string dir = YUESHI_CORPUS_DIR "/require_test/?.lua";
+    g.run("package.path = '" + dir + "'");
+    CHECK(as_int(g.run_scalar("return require('mod_self')")) == 42);
+}
+
+TEST_CASE("evaluator: require nonexistent module errors")
+{
+    EvalRig g;
+    g.run("package.path = './nope/?.lua'");
+    auto r = g.run("local ok, err = pcall(require, 'nonexistent_mod'); "
+                   "return ok, tostring(err)");
+    CHECK(as_bool(r[0]) == false);
+    CHECK(as_str(r[1]).find("module 'nonexistent_mod' not found") !=
+          std::string::npos);
+}
+
+TEST_CASE("evaluator: require dotted module name")
+{
+    EvalRig g;
+    // Standard path template: ? → sub/mod_nested, so sub/mod_nested.lua.
+    std::string dir = YUESHI_CORPUS_DIR "/require_test/?.lua";
+    g.run("package.path = '" + dir + "'");
+    auto r = g.run("return require('sub.mod_nested')");
+    CHECK(as_str(r[0]) == "nested");
+}
+
+TEST_CASE("evaluator: package.preload override")
+{
+    EvalRig g;
+    // Must be in a single run() call: a Lua closure's body points into
+    // the AST, which dies when run() returns.
+    CHECK(as_int(g.run_scalar(
+        "package.preload.custom = function() return 99 end; "
+        "return require('custom')")) == 99);
+}
+
+TEST_CASE("evaluator: package.searchpath")
+{
+    EvalRig g;
+    std::string dir = YUESHI_CORPUS_DIR "/require_test/?.lua";
+    g.run("package.path = '" + dir + "'");
+    auto r = g.run("return package.searchpath('mod_simple', package.path)");
+    CHECK(r[0].is_str());
+    CHECK(as_str(r[0]).find("mod_simple.lua") != std::string::npos);
+
+    // Failure case.
+    r = g.run("return package.searchpath('nope', './?.lua')");
+    CHECK(r[0].is_nil());
+    CHECK(r[1].is_str());
+}
+
+TEST_CASE("evaluator: package.loadlib stub")
+{
+    EvalRig g;
+    auto r = g.run("return package.loadlib('test', '*')");
+    CHECK(r.size() >= 3);
+    CHECK(r[0].is_nil());
+    CHECK(as_str(r[2]) == "absent");
+}
+
 
 
 

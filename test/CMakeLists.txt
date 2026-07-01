@@ -83,6 +83,7 @@ add_executable(yueshi_lua_evaluator_test
     ../src/lua/strlib.cpp
     ../src/lua/tablib.cpp
     ../src/lua/mathlib.cpp
+    ../src/lua/packagelib.cpp
     ../src/lua/pattern.cpp
     ../src/lua/numops.cpp
     ../src/lua/heap.cpp
@@ -92,6 +93,8 @@ target_link_libraries(yueshi_lua_evaluator_test PRIVATE peglib yueshi_test_main)
 target_include_directories(yueshi_lua_evaluator_test PRIVATE
     ${doctest_include_dir}
     ${CMAKE_SOURCE_DIR}/include)
+target_compile_definitions(yueshi_lua_evaluator_test PRIVATE
+    YUESHI_CORPUS_DIR="${CMAKE_SOURCE_DIR}/test/corpus")
 yueshi_test_enable_sanitizers(yueshi_lua_evaluator_test)
 add_test(NAME yueshi_lua_evaluator_test COMMAND yueshi_lua_evaluator_test)
 
@@ -106,6 +109,7 @@ add_executable(yueshi_lua_pack_corpus
     ../src/lua/strlib.cpp
     ../src/lua/tablib.cpp
     ../src/lua/mathlib.cpp
+    ../src/lua/packagelib.cpp
     ../src/lua/pattern.cpp
     ../src/lua/numops.cpp
     ../src/lua/heap.cpp

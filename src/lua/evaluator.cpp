@@ -14,6 +14,7 @@
 #include "lua/strlib.h"
 #include "lua/tablib.h"
 #include "lua/mathlib.h"
+#include "lua/packagelib.h"
 
 namespace ys
 {
@@ -486,6 +487,9 @@ namespace ys
             // M3.2-3: table + math libraries.
             install_table_lib(*this);
             install_math_lib(*this);
+            // M3.5-D: package library + require (must be after the other
+            // libs so package.loaded can pre-seed their identities).
+            install_package_lib(*this);
 
             // M3.5-B: load/loadstring/dofile.
             add("load",      builtins::b_load);

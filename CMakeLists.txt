@@ -22,6 +22,7 @@ target_sources(yueshi PRIVATE
     src/lua/strlib.cpp
     src/lua/tablib.cpp
     src/lua/mathlib.cpp
+    src/lua/packagelib.cpp
     src/lua/pattern.cpp
     src/lua/numops.cpp
     src/lua/heap.cpp
@@ -40,6 +41,7 @@ target_sources(yueshic PRIVATE
     src/lua/strlib.cpp
     src/lua/tablib.cpp
     src/lua/mathlib.cpp
+    src/lua/packagelib.cpp
     src/lua/pattern.cpp
     src/lua/numops.cpp
     src/lua/heap.cpp
