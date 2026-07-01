@@ -424,7 +424,8 @@ namespace ys
             set_const("mininteger",
                 LuaValue::integer(std::numeric_limits<long long>::min()));
 
-            ev.globals().vars["math"] = LuaValue::table(mtab);
+            { LuaKey gk; gk.k = LuaKey::K::Str; gk.s = "math";
+              ev.globals().hash[gk] = LuaValue::table(mtab); }
         }
 
     } // namespace lua

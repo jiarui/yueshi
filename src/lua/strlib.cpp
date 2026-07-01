@@ -1401,7 +1401,8 @@ namespace ys
             add("packsize", b_packsize);
 
             // Bind `string` into globals.
-            ev.globals().vars["string"] = LuaValue::table(strtab);
+            { LuaKey gk; gk.k = LuaKey::K::Str; gk.s = "string";
+              ev.globals().hash[gk] = LuaValue::table(strtab); }
 
             // Per-type string metatable: __index -> string table.
             Table* mt = h.make_table();

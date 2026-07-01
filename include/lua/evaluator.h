@@ -78,8 +78,10 @@ namespace ys
 
             Heap& heap() noexcept { return m_heap; }
 
-            // The global environment (the chunk's enclosing scope).
-            Environment& globals() noexcept { return *m_globals; }
+            // The global table (_G / the root _ENV). All builtins and stdlib
+            // tables are registered here. Per-scope _ENV tables are derived
+            // from this root (see Environment::env_table).
+            Table& globals() noexcept { return *m_G; }
 
             // Register the M2.0 builtins into globals(). Called once at
             // construction; idempotent.
@@ -102,7 +104,7 @@ namespace ys
         private:
             Heap&          m_heap;
             std::ostream*  m_out;
-            Environment*   m_globals;       // non-owning; Heap owns it
+            Table*         m_G;             // _G: the root _ENV table
             Table*         m_string_mt{nullptr};  // per-type string metatable (M3.1)
             std::size_t    m_depth{0};
             const peg::SourceMap* m_map{nullptr};  // optional, for error locations
@@ -156,6 +158,8 @@ namespace ys
             // Table store: t[key] = v. Computes the border cache invalidation
             // lazily (# recomputes when needed).
             void index_set(const LuaValue& obj, const LuaValue& key,
+                           LuaValue v, std::size_t off);
+            void index_set(const LuaValue& obj, std::string_view key,
                            LuaValue v, std::size_t off);
 
             // --- Metatable support (M2.1) ---

@@ -48,7 +48,7 @@ namespace ys
             String*      make_string(std::string s);
             Table*       make_table();
             Closure*     make_closure(const FuncBody* body, Environment* env,
-                                      bool is_vararg);
+                                      Table* env_table, bool is_vararg);
             Builtin*     make_builtin(std::string name, BuiltinFn fn);
             Environment* make_env(Environment* parent);
 

@@ -433,7 +433,8 @@ namespace ys
             add("move",   b_move);
             add("sort",   b_sort);
 
-            ev.globals().vars["table"] = LuaValue::table(ttab);
+            { LuaKey gk; gk.k = LuaKey::K::Str; gk.s = "table";
+              ev.globals().hash[gk] = LuaValue::table(ttab); }
         }
 
     } // namespace lua

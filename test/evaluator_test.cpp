@@ -2304,6 +2304,100 @@ TEST_CASE("evaluator: string.pack oversize integer round-trip")
         std::numeric_limits<long long>::max());
 }
 
+// =====================================================================
+// M3.5 Part A: _ENV / _G semantics
+// =====================================================================
+
+TEST_CASE("evaluator: _G basic identity")
+{
+    EvalRig g;
+    CHECK(g.run_scalar("return _G").is_table());
+    CHECK(as_bool(g.run_scalar("return _G._G == _G")) == true);
+    CHECK(as_str(g.run_scalar("return _VERSION")) == "Lua 5.4");
+}
+
+TEST_CASE("evaluator: global read/write via _G")
+{
+    EvalRig g;
+    CHECK(as_int(g.run_scalar("x = 10; return _G.x")) == 10);
+    CHECK(as_int(g.run_scalar("x = 10; return rawget(_G, 'x')")) == 10);
+    CHECK(as_int(g.run_scalar("_G.y = 20; return y")) == 20);
+    // assignment creates globals
+    CHECK(as_int(g.run_scalar("x = 42; return x")) == 42);
+}
+
+TEST_CASE("evaluator: local _ENV rebinds scope")
+{
+    EvalRig g;
+    // local _ENV = {} creates a sandbox: writes go to the new table.
+    CHECK(as_int(g.run_scalar(
+        "local _ENV = {}; x = 1; return x")) == 1);
+    // Original _G is not affected.
+    CHECK(g.run_scalar("local _ENV = {}; return _G").is_nil());
+    // Outer _G survives after the block exits.
+    CHECK(as_bool(g.run_scalar(
+        "do local _ENV = {} end; return _G == _G")) == true);
+    // Global access inside the sandbox reads from the new _ENV.
+    CHECK(g.run_scalar(
+        "do local _ENV = {}; a = 1 end; return a").is_nil());
+}
+
+TEST_CASE("evaluator: _ENV metamethods")
+{
+    EvalRig g;
+    // __index on _ENV for global fallback.
+    CHECK(as_int(g.run_scalar(
+        "setmetatable(_ENV, {__index = function() return 42 end}); "
+        "return nonexistent")) == 42);
+    // __newindex on _ENV for global write interception.
+    CHECK(as_int(g.run_scalar(
+        "setmetatable(_ENV, {__newindex = function(t,k,v) "
+        "rawset(t, 'wrapped_'..k, v) end}); "
+        "x = 1; return wrapped_x")) == 1);
+}
+
+TEST_CASE("evaluator: closure captures _ENV")
+{
+    EvalRig g;
+    // A closure captures _ENV at creation time.
+    CHECK(as_bool(g.run_scalar(
+        "function f() return _ENV end; return f() == _G")) == true);
+    // local _ENV in a function body.
+    CHECK(as_int(g.run_scalar(
+        "function f(x) local _ENV = {g = x}; return g end; "
+        "return f(99)")) == 99);
+    // A closure created inside a sandboxed scope captures the sandbox _ENV.
+    CHECK(as_int(g.run_scalar(
+        "local r; do local _ENV = {g = 99}; "
+        "r = function() return g end end; "
+        "return r()")) == 99);
+}
+
+TEST_CASE("evaluator: _ENV as table field (not the global)")
+{
+    EvalRig g;
+    // `_ENV` as a table field is NOT the global _ENV (Lua §3.3.2).
+    CHECK(as_int(g.run_scalar(
+        "local a = {_ENV = {x = 5}}; return a._ENV.x")) == 5);
+}
+
+TEST_CASE("evaluator: _ENV = nil causes global access errors")
+{
+    EvalRig g;
+    // _ENV = nil makes subsequent global reads error ("attempt to index a nil value").
+    auto r = g.run("local ok, err = pcall(function() _ENV = nil; return x end); "
+                   "return ok, tostring(err)");
+    CHECK(as_bool(r[0]) == false);
+}
+
+TEST_CASE("evaluator: _ENV rebind via assignment")
+{
+    EvalRig g;
+    // _ENV = tbl rebinds globals for the current scope.
+    CHECK(as_int(g.run_scalar(
+        "local t = {}; _ENV = t; x = 1; return t.x")) == 1);
+}
+
 
 
 

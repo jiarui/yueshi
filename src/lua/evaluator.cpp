@@ -21,7 +21,17 @@ namespace ys
         Evaluator::Evaluator(Heap& heap, std::ostream& out)
             : m_heap(heap), m_out(&out)
         {
-            m_globals = m_heap.make_env(nullptr);
+            m_G = m_heap.make_table();
+            // _G._G = _G (self-reference, canonical Lua identity).
+            {
+                LuaKey gk; gk.k = LuaKey::K::Str; gk.s = "_G";
+                m_G->hash[gk] = LuaValue::table(m_G);
+            }
+            // _VERSION
+            {
+                LuaKey vk; vk.k = LuaKey::K::Str; vk.s = "_VERSION";
+                m_G->hash[vk] = LuaValue::str(m_heap.make_string("Lua 5.4"));
+            }
             install_builtins();
         }
 
@@ -37,9 +47,12 @@ namespace ys
                 throw LuaError("expected a chunk at the AST root", root.start());
 
             Chunk& chunk = get<Chunk>(root);
-            // The main chunk is a vararg function. In M2.0 its `...` is empty
-            // (no caller), so we leave globals()->varargs default-empty.
-            Control c = eval_block(chunk.body, m_globals);
+            // The main chunk is a vararg function. Its `...` is empty (no
+            // caller). Evaluate the body in a fresh scope whose _ENV is _G.
+            // A per-run env means `local _ENV = {}` in one run doesn't leak.
+            Environment* chunk_env = m_heap.make_env(nullptr);
+            chunk_env->env_table = m_G;
+            Control c = eval_block(chunk.body, chunk_env);
             if (c.flow == Flow::Return)
                 return std::move(c.vals);
             if (c.flow == Flow::Goto)
@@ -353,7 +366,8 @@ namespace ys
         {
             auto add = [&](const char* name, BuiltinFn fn) {
                 Builtin* b = m_heap.make_builtin(name, fn);
-                m_globals->vars[name] = LuaValue::builtin(b);
+                LuaKey k; k.k = LuaKey::K::Str; k.s = name;
+                m_G->hash[k] = LuaValue::builtin(b);
             };
             add("print",    builtins::b_print);
             add("type",     builtins::b_type);
@@ -438,6 +452,10 @@ namespace ys
                                 x.attribs[i] == Attrib::Const) {
                                 env->consts.insert(x.names[i]);
                             }
+                            // _ENV rebind: `local _ENV = tbl` changes the
+                            // scope's globals table to tbl.
+                            if (x.names[i] == "_ENV" && v.is_table())
+                                env->env_table = v.as_table();
                         }
                         return {};
                     }
@@ -584,7 +602,7 @@ namespace ys
                         for (const auto& p : x.body.params)
                             if (p.kind == Param::Kind::Vararg) va = true;
                         LuaValue clo = LuaValue::closure(
-                            m_heap.make_closure(&x.body, env, va));
+                            m_heap.make_closure(&x.body, env, env->env_table, va));
                         env->vars[x.name] = clo;
                         return {};
                     }
@@ -600,7 +618,7 @@ namespace ys
                         for (const auto& p : x.body.params)
                             if (p.kind == Param::Kind::Vararg) va = true;
                         LuaValue clo = LuaValue::closure(
-                            m_heap.make_closure(&x.body, env, va));
+                            m_heap.make_closure(&x.body, env, env->env_table, va));
                         // Base name.
                         LuaValue base = lookup(env, nm.fields[0]);
                         // Intermediate table fields.
@@ -901,7 +919,7 @@ namespace ys
                         for (const auto& p : x.body.params)
                             if (p.kind == Param::Kind::Vararg) va = true;
                         return LuaValue::closure(
-                            m_heap.make_closure(&x.body, env, va));
+                            m_heap.make_closure(&x.body, env, env->env_table, va));
                     }
                     else if constexpr (std::is_same_v<T, Vararg>) {
                         // As a scalar, '...' is its first value (or nil).
@@ -1058,6 +1076,10 @@ namespace ys
             const FuncBody& fb = *clo->body;
             // New frame env, child of the closure's CAPTURED env (lexical scope).
             Environment* frame = m_heap.make_env(clo->env);
+            // The frame inherits the closure's captured _ENV (the globals table
+            // at closure-creation time), NOT clo->env->env_table (which may have
+            // been rebound since).
+            frame->env_table = clo->env_table;
             // Bind params: extras truncated, missing -> nil. A trailing '...'
             // collects the leftover arguments.
             std::size_t nparams = 0;
@@ -1285,35 +1307,71 @@ namespace ys
             throw LuaError("'__newindex' chain too long; possible loop", off);
         }
 
+        void Evaluator::index_set(const LuaValue& obj, std::string_view key,
+                                   LuaValue v, std::size_t off)
+        {
+            index_set(obj, LuaValue::str(m_heap.make_string(std::string{key})),
+                      v, off);
+        }
+
         // -------------------------------------------------------------------
         // Name lookup + assignment
         // -------------------------------------------------------------------
         LuaValue Evaluator::lookup(Environment* env, std::string_view name)
         {
+            // 1. Walk the local chain for an explicit binding.
             for (Environment* e = env; e; e = e->parent) {
                 auto it = e->vars.find(std::string{name});
                 if (it != e->vars.end()) return it->second;
             }
-            return LuaValue::nil();   // globals default to nil
+            // 2. _ENV is a pseudo-name: the implicit upvalue is the scope's
+            //    globals table. (A `local _ENV = ...` would be found in step 1.)
+            if (name == "_ENV")
+                return env->env_table ? LuaValue::table(env->env_table)
+                                      : LuaValue::nil();
+            // 3. Global access: read via the _ENV table (honors __index).
+            LuaValue env_val = env->env_table
+                ? LuaValue::table(env->env_table) : LuaValue::nil();
+            return index_get(env_val, name, 0);
         }
 
         void Evaluator::assign(Environment* env, std::string_view name,
                                LuaValue v, std::size_t off)
         {
-            // Walk the chain; assign to the existing binding, or fall back to
-            // the global environment (Lua semantics: a name without a local
-            // binding is a global).
+            // _ENV is special: rebinding it changes the scope's globals table.
+            // Lua 5.4 treats _ENV as an upvalue; assigning _ENV = x updates it
+            // for the current scope (and the declaring scope if `local _ENV`).
+            if (name == "_ENV") {
+                for (Environment* e = env; e; e = e->parent) {
+                    auto it = e->vars.find("_ENV");
+                    if (it != e->vars.end()) {
+                        if (e->consts.count("_ENV"))
+                            throw LuaError("attempt to assign to const variable "
+                                           "'_ENV'", off);
+                        it->second = v;
+                        e->env_table = v.is_table() ? v.as_table() : nullptr;
+                        break;
+                    }
+                }
+                env->env_table = v.is_table() ? v.as_table() : nullptr;
+                return;
+            }
+
+            // Walk the chain; assign to the existing local, or fall back to
+            // the _ENV table (a global write, honoring __newindex).
             for (Environment* e = env; e; e = e->parent) {
-                if (e->vars.find(std::string{name}) != e->vars.end()) {
-                    // <const> enforcement.
+                auto it = e->vars.find(std::string{name});
+                if (it != e->vars.end()) {
                     if (e->consts.count(std::string{name}))
                         throw LuaError("attempt to assign to const variable '" +
                                        std::string{name} + "'", off);
-                    e->vars[std::string{name}] = v;
+                    it->second = v;
                     return;
                 }
             }
-            m_globals->vars[std::string{name}] = v;
+            LuaValue env_val = env->env_table
+                ? LuaValue::table(env->env_table) : LuaValue::nil();
+            index_set(env_val, name, v, off);
         }
 
     } // namespace lua

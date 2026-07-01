@@ -123,7 +123,7 @@ TEST_CASE("gc: escaping closure keeps its captured environment alive")
     auto* env = g.heap.make_env(nullptr);
     env->vars["x"] = LuaValue::str(captured_str);
 
-    auto* clo = g.heap.make_closure(nullptr, env, false);  // body unused here
+    auto* clo = g.heap.make_closure(nullptr, env, nullptr, false);  // body unused here
     CHECK(g.heap.live_count() == 3);   // str + env + closure
 
     g.roots.push_back(static_cast<GCObject*>(clo));
@@ -219,7 +219,7 @@ TEST_CASE("gc: a closure's metatable is traced")
 {
     GCRig g;
     auto* env = g.heap.make_env(nullptr);
-    auto* clo = g.heap.make_closure(nullptr, env, false);
+    auto* clo = g.heap.make_closure(nullptr, env, nullptr, false);
     auto* mt  = g.heap.make_table();
     clo->metatable = mt;
     CHECK(g.heap.live_count() == 3);

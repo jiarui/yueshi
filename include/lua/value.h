@@ -211,13 +211,14 @@ namespace ys
         struct Closure : GCObject {
             const FuncBody* body;   // non-owning; the AST (parser) owns it
             Environment*    env;    // non-owning; the Heap owns it
+            Table*          env_table;   // _ENV upvalue (captured globals table)
             bool            is_vararg;
             // Per-closure metatable. Seldom used but supported (Lua allows
             // __call on functions via the per-type function metatable; we model
             // it per-value for uniformity with tables).
             Table*          metatable{nullptr};
-            Closure(const FuncBody* b, Environment* e, bool v)
-                : GCObject{}, body(b), env(e), is_vararg(v) {}
+            Closure(const FuncBody* b, Environment* e, Table* et, bool v)
+                : GCObject{}, body(b), env(e), env_table(et), is_vararg(v) {}
         };
 
         struct Builtin : GCObject {
@@ -232,10 +233,13 @@ namespace ys
         // is what lets escaping AND cyclic env<->closure pairs be collected.
         struct Environment : GCObject {
             Environment* parent;                        // non-owning
+            Table*       env_table;                     // _ENV for this scope
             std::unordered_map<std::string, LuaValue> vars;
             std::unordered_set<std::string> consts;     // <const> enforcement
             std::vector<LuaValue> varargs;              // '...' for this frame
-            explicit Environment(Environment* p) : GCObject{}, parent(p) {}
+            explicit Environment(Environment* p)
+                : GCObject{}, parent(p),
+                  env_table(p ? p->env_table : nullptr) {}
         };
 
         // as_gc: defined here, after all four object types are complete (the

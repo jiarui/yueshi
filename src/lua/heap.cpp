@@ -83,9 +83,9 @@ namespace ys
         }
 
         Closure* Heap::make_closure(const FuncBody* body, Environment* env,
-                                    bool is_vararg)
+                                    Table* env_table, bool is_vararg)
         {
-            auto* o = new Closure(body, env, is_vararg);
+            auto* o = new Closure(body, env, env_table, is_vararg);
             link(o, ObjType::Closure);
             maybe_collect();
             return o;
@@ -209,6 +209,7 @@ namespace ys
             case ObjType::Closure: {
                 auto* c = static_cast<Closure*>(o);
                 if (c->env) emit(static_cast<GCObject*>(c->env));
+                if (c->env_table) emit(static_cast<GCObject*>(c->env_table));
                 if (c->metatable)
                     emit(static_cast<GCObject*>(c->metatable));
                 break;
@@ -216,6 +217,7 @@ namespace ys
             case ObjType::Env: {
                 auto* e = static_cast<Environment*>(o);
                 if (e->parent) emit(static_cast<GCObject*>(e->parent));
+                if (e->env_table) emit(static_cast<GCObject*>(e->env_table));
                 for (const auto& [k, v] : e->vars)
                     if (GCObject* c = v.as_gc()) emit(c);
                 for (const LuaValue& v : e->varargs)
