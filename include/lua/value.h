@@ -201,6 +201,10 @@ namespace ys
 
         struct Table : GCObject {
             std::unordered_map<LuaKey, LuaValue> hash;
+            // Per-table metatable (Lua 5.4 §2.4). Non-owning: the Heap owns it
+            // like every other GC object. Traced in heap.cpp trace(). nil in
+            // the common case; populated by setmetatable().
+            Table* metatable{nullptr};
             Table() : GCObject{} {}
         };
 
@@ -208,6 +212,10 @@ namespace ys
             const FuncBody* body;   // non-owning; the AST (parser) owns it
             Environment*    env;    // non-owning; the Heap owns it
             bool            is_vararg;
+            // Per-closure metatable. Seldom used but supported (Lua allows
+            // __call on functions via the per-type function metatable; we model
+            // it per-value for uniformity with tables).
+            Table*          metatable{nullptr};
             Closure(const FuncBody* b, Environment* e, bool v)
                 : GCObject{}, body(b), env(e), is_vararg(v) {}
         };

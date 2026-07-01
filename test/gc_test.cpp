@@ -181,3 +181,51 @@ TEST_CASE("gc: NaN is rejected as a table key")
     CHECK_FALSE(to_key(LuaValue::flt(nan), k));
     CHECK_FALSE(to_key(LuaValue::nil(), k));
 }
+
+TEST_CASE("gc: a table's metatable is traced (kept alive via the table)")
+{
+    // Root the table only; its metatable must survive through the metatable
+    // edge added in M2.1.
+    GCRig g;
+    auto* t  = g.heap.make_table();
+    auto* mt = g.heap.make_table();
+    t->metatable = mt;
+    CHECK(g.heap.live_count() == 2);
+
+    g.roots.push_back(static_cast<GCObject*>(t));
+    std::size_t swept = g.heap.collect([&](auto visitor) { g.mark_all(visitor); });
+    CHECK(swept == 0);
+    CHECK(g.heap.live_count() == 2);
+    CHECK(t->metatable == mt);   // untouched by sweep
+}
+
+TEST_CASE("gc: an unreachable table + its metatable are both swept")
+{
+    // Neither rooted -> both die, including the metatable edge. This is the
+    // M2.1 extension of the cycle test: the metatable is only reachable
+    // through the (now-dead) table.
+    GCRig g;
+    auto* t  = g.heap.make_table();
+    auto* mt = g.heap.make_table();
+    t->metatable = mt;
+    CHECK(g.heap.live_count() == 2);
+
+    std::size_t swept = g.heap.collect([&](auto /*visitor*/) { /* no roots */ });
+    CHECK(swept == 2);
+    CHECK(g.heap.live_count() == 0);
+}
+
+TEST_CASE("gc: a closure's metatable is traced")
+{
+    GCRig g;
+    auto* env = g.heap.make_env(nullptr);
+    auto* clo = g.heap.make_closure(nullptr, env, false);
+    auto* mt  = g.heap.make_table();
+    clo->metatable = mt;
+    CHECK(g.heap.live_count() == 3);
+
+    g.roots.push_back(static_cast<GCObject*>(clo));
+    std::size_t swept = g.heap.collect([&](auto visitor) { g.mark_all(visitor); });
+    CHECK(swept == 0);   // closure -> env, closure -> mt, all reachable
+    CHECK(g.heap.live_count() == 3);
+}

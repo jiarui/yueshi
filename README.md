@@ -16,14 +16,20 @@ precedence ladder, suffix-loop `prefixexp`, S-expression printer) and passes
 allowlist as a regression guard). The **evaluator** is a GC-first
 tree-walking interpreter: a tagged-union value model with an intrusive
 mark-sweep collector (no `shared_ptr` — ownership is singular, in the Heap),
-Lua 5.4 integer/float subtype arithmetic, closures, tables, multires, and a
-minimal standard library (`print`/`type`/`tostring`/`tonumber`/`error`/
-`assert`/`ipairs`/`pairs`/`next`/`select`/`rawget`/`rawset`/`rawequal`/
-`rawlen`). It passes **83/83** evaluator unit tests (2 581 assertions) and a
-**9/9** GC unit suite (32 assertions) that verifies unreachable cycles are
-collected and escaping closures keep their captured environment alive. All
-gates are green under ASan + UBSan with leak detection. Metatables, goto/
-labels, and the full standard library are the next milestones.
+Lua 5.4 integer/float subtype arithmetic, closures, tables, multires, the
+full **metatable/metamethod** system (all arithmetic/bitwise/concat/ordering/
+equality events, `__index`/`__newindex` chains, `__call`, `__len`,
+`__tostring`, `setmetatable`/`getmetatable`), and **goto/labels**
+(`goto name` / `::name::`, backward and forward, in/out of any block or
+loop, with a per-block memoized label cache), plus a minimal standard library
+(`print`/`type`/`tostring`/`tonumber`/`error`/`assert`/`ipairs`/`pairs`/
+`next`/`select`/`rawget`/`rawset`/`rawequal`/`rawlen`). It passes **107/107**
+evaluator unit tests (6 386 assertions) and a **12/12** GC unit suite (42
+assertions) that verifies unreachable cycles (and tables with metatables) are
+collected while escaping closures keep their captured environment alive. All
+gates are green under ASan + UBSan with leak detection. The full standard
+library (`string`/`table`/`math`/`io`/`os`, real `_G`/`_ENV`) is the next
+milestone.
 See [TODO.md](TODO.md) for the full roadmap.
 
 ## Architecture
@@ -43,7 +49,10 @@ yueshi uses a **double-pass + interpret** architecture:
    them via stop-the-world mark-sweep from a root set (the live environment
    chain). No `shared_ptr`: aliasing is non-owning pointers, and cycles are
    collected by reachability — the whole point of designing GC in at the
-   floor rather than bolting it on.
+   floor rather than bolting it on. Tables (and closures) carry a per-value
+   `metatable` pointer traced by the collector; the full metamethod event set
+   (arithmetic, bitwise, concat, ordering, equality, `__index`/`__newindex`,
+   `__call`, `__len`, `__tostring`) routes through it.
 
 ## Project Layout
 

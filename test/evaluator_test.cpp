@@ -797,6 +797,477 @@ TEST_CASE("evaluator: pairs with multiple assignment loop vars")
         "for k, v in pairs(t) do sumv = sumv + v end; return sumv")) == 30);
 }
 
+// =====================================================================
+// M2.1: metatables + metamethods
+// =====================================================================
+
+TEST_CASE("evaluator: setmetatable / getmetatable basics")
+{
+    EvalRig g;
+    // Without a metatable, getmetatable returns nil.
+    CHECK(as_bool(g.run_scalar(
+        "local t = {}; return getmetatable(t) == nil")) == true);
+    // Attach + round-trip identity.
+    CHECK(as_bool(g.run_scalar(
+        "local t = {}; local mt = {}; setmetatable(t, mt); "
+        "return getmetatable(t) == mt")) == true);
+    // setmetatable returns the table (chainable).
+    CHECK(as_bool(g.run_scalar(
+        "local mt = {}; local t = setmetatable({}, mt); "
+        "return getmetatable(t) == mt")) == true);
+    // nil clears the metatable.
+    CHECK(as_bool(g.run_scalar(
+        "local t = setmetatable({}, {}); setmetatable(t, nil); "
+        "return getmetatable(t) == nil")) == true);
+    // Non-table arg errors.
+    bool threw = false;
+    try { (void)g.run_scalar("setmetatable(5, {})"); }
+    catch (const LuaError&) { threw = true; }
+    CHECK(threw);
+    // Non-table metatable errors.
+    threw = false;
+    try { (void)g.run_scalar("setmetatable({}, 5)"); }
+    catch (const LuaError&) { threw = true; }
+    CHECK(threw);
+}
+
+TEST_CASE("evaluator: arithmetic metamethods (7 events)")
+{
+    EvalRig g;
+    const char* setup =
+        "local mt = { "
+        "  __add  = function(a, b) return 'add' end, "
+        "  __sub  = function(a, b) return 'sub' end, "
+        "  __mul  = function(a, b) return 'mul' end, "
+        "  __div  = function(a, b) return 'div' end, "
+        "  __idiv = function(a, b) return 'idiv' end, "
+        "  __mod  = function(a, b) return 'mod' end, "
+        "  __pow  = function(a, b) return 'pow' end } ";
+    CHECK(as_str(g.run_scalar(std::string{setup} +
+        "local t = setmetatable({}, mt); return t + 1")) == "add");
+    CHECK(as_str(g.run_scalar(std::string{setup} +
+        "local t = setmetatable({}, mt); return 1 + t")) == "add");  // right operand
+    CHECK(as_str(g.run_scalar(std::string{setup} +
+        "local t = setmetatable({}, mt); return t - 1")) == "sub");
+    CHECK(as_str(g.run_scalar(std::string{setup} +
+        "local t = setmetatable({}, mt); return t * 1")) == "mul");
+    CHECK(as_str(g.run_scalar(std::string{setup} +
+        "local t = setmetatable({}, mt); return t / 1")) == "div");
+    CHECK(as_str(g.run_scalar(std::string{setup} +
+        "local t = setmetatable({}, mt); return t // 1")) == "idiv");
+    CHECK(as_str(g.run_scalar(std::string{setup} +
+        "local t = setmetatable({}, mt); return t % 1")) == "mod");
+    CHECK(as_str(g.run_scalar(std::string{setup} +
+        "local t = setmetatable({}, mt); return t ^ 1")) == "pow");
+    // Left operand's metamethod wins when BOTH operands have one.
+    CHECK(as_str(g.run_scalar(
+        "local a = setmetatable({}, {__add = function() return 'A' end}); "
+        "local b = setmetatable({}, {__add = function() return 'B' end}); "
+        "return a + b")) == "A");
+    // Raw numbers bypass entirely.
+    CHECK(as_int(g.run_scalar("return 2 + 3")) == 5);
+    // No metamethod and not numbers -> error.
+    bool threw = false;
+    try { (void)g.run_scalar("local t = {}; return t + 1"); }
+    catch (const LuaError&) { threw = true; }
+    CHECK(threw);
+}
+
+TEST_CASE("evaluator: unary - and # metamethods")
+{
+    EvalRig g;
+    CHECK(as_str(g.run_scalar(
+        "local t = setmetatable({}, {__unm = function(a) return 'neg' end}); "
+        "return -t")) == "neg");
+    CHECK(as_int(g.run_scalar(
+        "local t = setmetatable({}, {__len = function(a) return 42 end}); "
+        "return #t")) == 42);
+    // # still works on raw tables/strings.
+    CHECK(as_int(g.run_scalar("return #{1,2,3}")) == 3);
+    CHECK(as_int(g.run_scalar("return #\"hi\"")) == 2);
+}
+
+TEST_CASE("evaluator: bitwise metamethods")
+{
+    EvalRig g;
+    const char* setup =
+        "local mt = { "
+        "  __band = function(a, b) return 'band' end, "
+        "  __bor  = function(a, b) return 'bor' end, "
+        "  __bxor = function(a, b) return 'bxor' end, "
+        "  __shl  = function(a, b) return 'shl' end, "
+        "  __shr  = function(a, b) return 'shr' end, "
+        "  __bnot = function(a) return 'bnot' end } ";
+    CHECK(as_str(g.run_scalar(std::string{setup} +
+        "local t = setmetatable({}, mt); return t & 1")) == "band");
+    CHECK(as_str(g.run_scalar(std::string{setup} +
+        "local t = setmetatable({}, mt); return t | 1")) == "bor");
+    CHECK(as_str(g.run_scalar(std::string{setup} +
+        "local t = setmetatable({}, mt); return t ~ 1")) == "bxor");
+    CHECK(as_str(g.run_scalar(std::string{setup} +
+        "local t = setmetatable({}, mt); return t << 1")) == "shl");
+    CHECK(as_str(g.run_scalar(std::string{setup} +
+        "local t = setmetatable({}, mt); return t >> 1")) == "shr");
+    CHECK(as_str(g.run_scalar(std::string{setup} +
+        "local t = setmetatable({}, mt); return ~t")) == "bnot");
+    // Raw ints bypass.
+    CHECK(as_int(g.run_scalar("return 6 & 3")) == 2);
+}
+
+TEST_CASE("evaluator: __concat metamethod")
+{
+    EvalRig g;
+    CHECK(as_str(g.run_scalar(
+        "local t = setmetatable({}, {__concat = function(a, b) return 'cc' end}); "
+        "return t .. 1")) == "cc");
+    // Right operand's metamethod when only it has one.
+    CHECK(as_str(g.run_scalar(
+        "local t = setmetatable({}, {__concat = function(a, b) return 'cc' end}); "
+        "return 'x' .. t")) == "cc");
+    // Raw concat still works.
+    CHECK(as_str(g.run_scalar("return 'a' .. 'b' .. 1")) == "ab1");
+}
+
+TEST_CASE("evaluator: __eq / __lt / __le metamethods + derived")
+{
+    EvalRig g;
+    // __eq only fires for distinct tables not raw-equal.
+    CHECK(as_bool(g.run_scalar(
+        "local mt = {__eq = function(a, b) return true end}; "
+        "local a = setmetatable({}, mt); local b = setmetatable({}, mt); "
+        "return a == b")) == true);
+    CHECK(as_bool(g.run_scalar(
+        "local mt = {__eq = function(a, b) return true end}; "
+        "local a = setmetatable({}, mt); local b = setmetatable({}, mt); "
+        "return a ~= b")) == false);
+    // Different types never use __eq.
+    CHECK(as_bool(g.run_scalar(
+        "local a = setmetatable({}, {__eq = function() return true end}); "
+        "return a == 5")) == false);
+    // Raw-equal objects skip __eq.
+    CHECK(as_bool(g.run_scalar("return 1 == 1.0")) == true);
+
+    // __lt / __le on tables.
+    CHECK(as_bool(g.run_scalar(
+        "local mt = {__lt = function(a, b) return true end}; "
+        "local a = setmetatable({}, mt); local b = setmetatable({}, mt); "
+        "return a < b")) == true);
+    CHECK(as_bool(g.run_scalar(
+        "local mt = {__le = function(a, b) return true end}; "
+        "local a = setmetatable({}, mt); local b = setmetatable({}, mt); "
+        "return a <= b")) == true);
+    // Derived: a > b uses __lt(b, a); here always true -> a > b is true.
+    CHECK(as_bool(g.run_scalar(
+        "local mt = {__lt = function(a, b) return true end}; "
+        "local a = setmetatable({}, mt); local b = setmetatable({}, mt); "
+        "return a > b")) == true);
+    // __le fallback to `not (b < a)` when only __lt present.
+    CHECK(as_bool(g.run_scalar(
+        "local mt = {__lt = function(a, b) return false end}; "
+        "local a = setmetatable({}, mt); local b = setmetatable({}, mt); "
+        "return a <= b")) == true);   // not (b < a) = not false = true
+    // Raw ordering still works.
+    CHECK(as_bool(g.run_scalar("return 1 < 2 and 'a' < 'b'")) == true);
+}
+
+TEST_CASE("evaluator: __index as a table (prototype OOP)")
+{
+    EvalRig g;
+    // Prototype lookup: missing key falls through to __index table.
+    CHECK(as_bool(g.run_scalar(
+        "local proto = {kind = 'thing'}; "
+        "local obj = setmetatable({}, {__index = proto}); "
+        "return obj.kind == 'thing' and "   // string compare -> true
+        "       obj.missing == nil")) == true);  // absent -> nil
+    // Multi-level prototype chain.
+    CHECK(as_str(g.run_scalar(
+        "local gp = {v = 'deep'}; "
+        "local p = setmetatable({}, {__index = gp}); "
+        "local obj = setmetatable({}, {__index = p}); "
+        "return obj.v")) == "deep");
+    // Method via prototype.
+    CHECK(as_str(g.run_scalar(
+        "local proto = {greet = function(self) return 'hi' end}; "
+        "local obj = setmetatable({}, {__index = proto}); "
+        "return obj:greet()")) == "hi");
+}
+
+TEST_CASE("evaluator: __index as a function")
+{
+    EvalRig g;
+    CHECK(as_str(g.run_scalar(
+        "local obj = setmetatable({}, "
+        "  {__index = function(t, k) return 'default:' .. k end}); "
+        "return obj.foo")) == "default:foo");
+}
+
+TEST_CASE("evaluator: raw slot wins over __index / __newindex")
+{
+    EvalRig g;
+    // __index: a present non-nil slot is returned, __index not consulted.
+    CHECK(as_int(g.run_scalar(
+        "local obj = setmetatable({n = 7}, "
+        "  {__index = function() return 999 end}); "
+        "return obj.n")) == 7);
+    // __newindex: an existing non-nil slot is overwritten directly; the
+    // metamethod must NOT fire. We make __newindex error to prove it.
+    CHECK(as_int(g.run_scalar(
+        "local t = setmetatable({x = 1}, "
+        "  {__newindex = function() error('nope') end}); "
+        "t.x = 5; return t.x")) == 5);
+    // __newindex function IS called for an absent slot (value not stored raw).
+    CHECK(as_bool(g.run_scalar(
+        "local store = {}; "
+        "local t = setmetatable({}, {__newindex = function(tab, k, v) "
+        "  store[k] = v end}); "
+        "t.k = 'v'; return store.k == 'v' and t.k == nil")) == true);
+    // __newindex as a table: writes go to the shadow table.
+    CHECK(as_str(g.run_scalar(
+        "local shadow = {}; "
+        "local t = setmetatable({}, {__newindex = shadow}); "
+        "t.k = 'v'; return shadow.k")) == "v");
+}
+
+TEST_CASE("evaluator: __call metamethod")
+{
+    EvalRig g;
+    CHECK(as_int(g.run_scalar(
+        "local t = setmetatable({}, "
+        "  {__call = function(self, ...) return select('#', ...) end}); "
+        "return t(1, 2, 3)")) == 3);
+    // The callable value is passed as the first argument.
+    CHECK(as_int(g.run_scalar(
+        "local t = setmetatable({n = 7}, "
+        "  {__call = function(self) return self.n end}); "
+        "return t()")) == 7);
+    // Calling a non-callable without __call errors.
+    bool threw = false;
+    try { (void)g.run_scalar("local t = {}; return t()"); }
+    catch (const LuaError&) { threw = true; }
+    CHECK(threw);
+}
+
+TEST_CASE("evaluator: __tostring metamethod via tostring()/print()")
+{
+    EvalRig g;
+    CHECK(as_str(g.run_scalar(
+        "local t = setmetatable({}, {__tostring = function() return 'T!' end}); "
+        "return tostring(t)")) == "T!");
+    // print routes each arg through tostring (hence __tostring).
+    g.run("local t = setmetatable({}, {__tostring = function() return 'OBJ' end}); "
+          "print(t)");
+    CHECK(g.out.str() == "OBJ\n");
+    // __tostring must return a string.
+    bool threw = false;
+    try { (void)g.run_scalar(
+        "local t = setmetatable({}, {__tostring = function() return 5 end}); "
+        "return tostring(t)"); }
+    catch (const LuaError&) { threw = true; }
+    CHECK(threw);
+    // No __tostring -> raw rendering ("table: 0x...").
+    CHECK(g.run_scalar("local t = {}; return tostring(t)").as_str()->data.substr(0, 5)
+          == "table");
+}
+
+TEST_CASE("evaluator: full OOP class pattern (Vector)")
+{
+    EvalRig g;
+    const char* cls =
+        "local Vector = {} Vector.__index = Vector "
+        "function Vector.new(x, y) return setmetatable({x = x, y = y}, Vector) end "
+        "function Vector:len() return (self.x * self.x + self.y * self.y) ^ 0.5 end "
+        "function Vector.__add(a, b) return Vector.new(a.x + b.x, a.y + b.y) end "
+        "function Vector.__eq(a, b) return a.x == b.x and a.y == b.y end ";
+    // len() on (3,4) -> 5.0.
+    CHECK(as_flt(g.run_scalar(std::string{cls} +
+        "return Vector.new(3,4):len()")) == 5.0);
+    // operator overloading: (3,4)+(1,1)=(4,5) -> len ~6.4031.
+    CHECK(as_flt(g.run_scalar(std::string{cls} +
+        "return (Vector.new(3,4) + Vector.new(1,1)):len()")) == doctest::Approx(6.4031));
+    // __eq value equality.
+    CHECK(as_bool(g.run_scalar(std::string{cls} +
+        "return Vector.new(3,4) == Vector.new(3,4)")) == true);
+    CHECK(as_bool(g.run_scalar(std::string{cls} +
+        "return Vector.new(3,4) == Vector.new(3,5)")) == false);
+}
+
+TEST_CASE("evaluator: raw* builtins bypass metamethods after M2.1")
+{
+    EvalRig g;
+    // rawget ignores __index.
+    CHECK(as_bool(g.run_scalar(
+        "local t = setmetatable({}, {__index = function() return 'X' end}); "
+        "return rawget(t, 'k') == nil")) == true);
+    // rawset ignores __newindex.
+    CHECK(as_int(g.run_scalar(
+        "local t = setmetatable({}, {__newindex = function() error('nope') end}); "
+        "rawset(t, 'k', 9); return rawget(t, 'k')")) == 9);
+    // rawequal ignores __eq.
+    CHECK(as_bool(g.run_scalar(
+        "local mt = {__eq = function() return true end}; "
+        "local a = setmetatable({}, mt); local b = setmetatable({}, mt); "
+        "return rawequal(a, b)")) == false);
+    // rawlen ignores __len.
+    CHECK(as_int(g.run_scalar(
+        "local t = setmetatable({}, {__len = function() return 999 end}); "
+        "return rawlen(t)")) == 0);
+}
+
+// =====================================================================
+// M2.2: goto / labels
+// =====================================================================
+
+TEST_CASE("evaluator: backward goto (loop pattern)")
+{
+    EvalRig g;
+    // A backward goto implements a while-loop: count 1..5.
+    CHECK(as_int(g.run_scalar(
+        "local i = 1; local s = 0; "
+        "::top:: if i <= 5 then s = s + i; i = i + 1; goto top end; "
+        "return s")) == 15);
+}
+
+TEST_CASE("evaluator: forward goto (skip then continue)")
+{
+    EvalRig g;
+    // Skip over an assignment to x, then the next statement runs.
+    CHECK(as_int(g.run_scalar(
+        "local x = 1; goto skip; x = 999; ::skip:: x = x + 10; return x")) == 11);
+}
+
+TEST_CASE("evaluator: mutual goto state machine (l1 -> l2 -> l3)")
+{
+    EvalRig g;
+    CHECK(as_int(g.run_scalar(
+        "local log = {} "
+        "::l1:: log[#log+1] = 1; goto l2; "
+        "::l2:: log[#log+1] = 2; goto l3; "
+        "::l3:: log[#log+1] = 3; "
+        "local s = 0; for i = 1, #log do s = s + log[i] end; "
+        "return s")) == 6);
+}
+
+TEST_CASE("evaluator: goto out of nested do block")
+{
+    EvalRig g;
+    // Label is in the enclosing block; goto propagates through the Do. Execution
+    // resumes AT the label and continues (the `x = x + 100` between is skipped).
+    CHECK(as_int(g.run_scalar(
+        "local x = 0; "
+        "do x = x + 1; goto done; x = 999 end; "   // x = 1, goto escapes the do
+        "x = x + 1000; "                            // SKIPPED
+        "::done:: x = x + 100; return x")) == 101); // resumes here: x = 1 + 100
+}
+
+TEST_CASE("evaluator: goto out of while / repeat / numeric-for / generic-for")
+{
+    EvalRig g;
+    // while
+    CHECK(as_int(g.run_scalar(
+        "local i = 0; local hit = 0; "
+        "while true do i = i + 1; if i == 3 then hit = i; goto out end end; "
+        "::out:: return hit")) == 3);
+    // repeat-until
+    CHECK(as_int(g.run_scalar(
+        "local i = 0; local hit = 0; "
+        "repeat i = i + 1; if i == 4 then hit = i; goto out end until false; "
+        "::out:: return hit")) == 4);
+    // numeric for
+    CHECK(as_int(g.run_scalar(
+        "local hit = 0; "
+        "for i = 1, 100 do if i == 7 then hit = i; goto out end end; "
+        "::out:: return hit")) == 7);
+    // generic for (ipairs)
+    CHECK(as_int(g.run_scalar(
+        "local hit = 0; "
+        "for i, v in ipairs({10,20,30,40}) do "
+        "  if v == 30 then hit = i; goto out end "
+        "end; "
+        "::out:: return hit")) == 3);
+}
+
+TEST_CASE("evaluator: goto inside if branch to enclosing label")
+{
+    EvalRig g;
+    // The label lives in the block enclosing the if; the goto is inside an if
+    // branch. Both Do/If propagate Goto via `return eval_block_box(...)`.
+    CHECK(as_int(g.run_scalar(
+        "local x = 0; "
+        "if true then x = x + 1; goto done; x = x + 999 end; "
+        "::done:: x = x + 10; return x")) == 11);
+}
+
+TEST_CASE("evaluator: multiple distinct labels in one block")
+{
+    EvalRig g;
+    // Two labels; a goto must pick the named one, not the nearest. (Lua
+    // requires `return` to be the last statement in a block, so each branch's
+    // return is wrapped in its own do-end block.)
+    CHECK(as_str(g.run_scalar(
+        "goto b; "
+        "::a:: do return 'A' end; "
+        "::b:: do return 'B' end")) == "B");
+}
+
+TEST_CASE("evaluator: no visible label raises LuaError")
+{
+    EvalRig g;
+    bool threw = false;
+    try { (void)g.run_scalar("goto missing"); }
+    catch (const LuaError& e) {
+        threw = true;
+        CHECK(std::string(e.what()).find("no visible label") != std::string::npos);
+        CHECK(std::string(e.what()).find("'missing'") != std::string::npos);
+    }
+    CHECK(threw);
+}
+
+TEST_CASE("evaluator: cross-function goto raises when function called")
+{
+    EvalRig g;
+    // A goto whose label is in the enclosing chunk: inside the function it has
+    // no visible label, so calling f() must raise.
+    bool threw = false;
+    try {
+        (void)g.run_scalar(
+            "local function f() goto escape end; "
+            "f(); "
+            "::escape:: return 1");
+    }
+    catch (const LuaError& e) {
+        threw = true;
+        CHECK(std::string(e.what()).find("no visible label") != std::string::npos);
+        CHECK(std::string(e.what()).find("'escape'") != std::string::npos);
+    }
+    CHECK(threw);
+}
+
+TEST_CASE("evaluator: goto label is case-sensitive")
+{
+    EvalRig g;
+    // Lua labels are case-sensitive identifiers; ::Loop:: != ::loop::.
+    bool threw = false;
+    try { (void)g.run_scalar("goto Loop; ::loop::"); }
+    catch (const LuaError&) { threw = true; }
+    CHECK(threw);
+}
+
+TEST_CASE("evaluator: goto across repeated loop iterations works")
+{
+    EvalRig g;
+    // Re-entering a loop body block reuses the cached label map: a goto inside
+    // the loop body whose label is also inside the body must work on every
+    // iteration, not just the first. (Exercises the memoization path.)
+    CHECK(as_int(g.run_scalar(
+        "local s = 0; "
+        "for i = 1, 3 do "
+        "  goto body; "
+        "  s = s + 1000; "        // skipped each iteration
+        "  ::body:: s = s + i "   // runs each iteration
+        "end; "
+        "return s")) == 6);       // 1 + 2 + 3
+}
+
 
 
 

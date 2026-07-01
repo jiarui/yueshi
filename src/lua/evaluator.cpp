@@ -24,6 +24,11 @@ namespace ys
 
         ValueVec Evaluator::run(AstNode root)
         {
+            // Clear the per-block label cache: a previous run's Block* pointers
+            // would dangle (and reuse across chunks is meaningless). Each run
+            // rebuilds its own caches lazily.
+            m_labels.clear();
+
             // The chunk root is a Chunk{ Block body }.
             if (!holds<Chunk>(root))
                 throw LuaError("expected a chunk at the AST root", root.start());
@@ -34,6 +39,9 @@ namespace ys
             Control c = eval_block(chunk.body, m_globals);
             if (c.flow == Flow::Return)
                 return std::move(c.vals);
+            if (c.flow == Flow::Goto)
+                throw LuaError("no visible label '" + c.label +
+                               "' for <goto> at chunk level", c.off);
             return {};
         }
 
@@ -48,7 +56,7 @@ namespace ys
         {
             std::string sep;
             for (const LuaValue& v : args) {
-                ev.out() << sep << value_to_string(v);
+                ev.out() << sep << ev.stringify(v, 0).as_str()->data;
                 sep = "\t";
             }
             ev.out() << "\n";
@@ -64,7 +72,7 @@ namespace ys
         ValueVec b_tostring(Evaluator& ev, ValueVec args)
         {
             LuaValue v = args.empty() ? LuaValue::nil() : args[0];
-            return {LuaValue::str(ev.heap().make_string(value_to_string(v)))};
+            return {ev.stringify(v, 0)};
         }
 
         ValueVec b_tonumber(Evaluator& ev, ValueVec args)
@@ -240,6 +248,32 @@ namespace ys
             throw LuaError("table or string expected", 0);
         }
 
+        // setmetatable(t, mt): attach a metatable to t. t must be a table; mt
+        // must be a table or nil (nil clears it). Returns t. (Real Lua errors
+        // if t has a __metatable field; that is deferred — we return raw.)
+        ValueVec b_setmetatable(Evaluator&, ValueVec args)
+        {
+            LuaValue t = args.size() >= 1 ? args[0] : LuaValue::nil();
+            if (!t.is_table())
+                throw LuaError("bad argument #1 to 'setmetatable' "
+                               "(table expected)", 0);
+            LuaValue mt = args.size() >= 2 ? args[1] : LuaValue::nil();
+            if (!(mt.is_table() || mt.is_nil()))
+                throw LuaError("bad argument #2 to 'setmetatable' "
+                               "(nil or table expected)", 0);
+            t.as_table()->metatable = mt.is_nil() ? nullptr : mt.as_table();
+            return {t};
+        }
+
+        // getmetatable(t): returns t's metatable, or nil if it has none.
+        ValueVec b_getmetatable(Evaluator&, ValueVec args)
+        {
+            LuaValue t = args.size() >= 1 ? args[0] : LuaValue::nil();
+            if (!t.is_table()) return {LuaValue::nil()};
+            Table* mt = t.as_table()->metatable;
+            return {mt ? LuaValue::table(mt) : LuaValue::nil()};
+        }
+
         } // namespace builtins
 
         void Evaluator::install_builtins()
@@ -262,18 +296,43 @@ namespace ys
             add("rawset",   builtins::b_rawset);
             add("rawequal", builtins::b_rawequal);
             add("rawlen",   builtins::b_rawlen);
+            add("setmetatable", builtins::b_setmetatable);
+            add("getmetatable", builtins::b_getmetatable);
         }
 
         // -------------------------------------------------------------------
         // Block + statement evaluation
         // -------------------------------------------------------------------
+        // Index-driven so goto can resume at a matching Label. The label cache
+        // is memoized in m_labels: each Block is scanned exactly once per run
+        // (re-entered loop/function bodies reuse the cached map). Goto whose
+        // label lives in THIS block resumes here; otherwise it propagates to an
+        // enclosing block (which may catch it), or to call_value/run, which
+        // report "no visible label".
         Control Evaluator::eval_block(const Block& blk, Environment* env)
         {
-            for (const Box& s : blk.stmts) {
-                if (!s) continue;
-                Control c = eval_stat(*s, env);
-                if (c.flow != Flow::Normal)
-                    return c;   // break/return propagates out of the block
+            LabelCache& labels = m_labels[&blk];
+            if (!labels.built) {
+                for (std::size_t i = 0; i < blk.stmts.size(); ++i) {
+                    const Box* s = &blk.stmts[i];
+                    if (*s && holds<Label>(**s))
+                        labels.m[get<Label>(**s).name] = i;   // last-wins
+                }
+                labels.built = true;
+            }
+            for (std::size_t i = 0; i < blk.stmts.size(); ++i) {
+                if (!blk.stmts[i]) continue;
+                Control c = eval_stat(*blk.stmts[i], env);
+                if (c.flow == Flow::Normal) continue;
+                if (c.flow == Flow::Goto) {
+                    auto it = labels.m.find(c.label);
+                    if (it != labels.m.end()) {
+                        i = it->second;        // land at the Label (a no-op);
+                        continue;              // ++i moves past it
+                    }
+                    // Not in this block: propagate to the enclosing scope.
+                }
+                return c;   // Break/Return/unresolved-Goto propagates out
             }
             return {};   // Normal
         }
@@ -329,6 +388,7 @@ namespace ys
                             Control c = eval_block_box(x.body, env);
                             if (c.flow == Flow::Break)    break;
                             if (c.flow == Flow::Return)   return c;
+                            if (c.flow == Flow::Goto)     return c;  // target outside loop
                         }
                         return {};
                     }
@@ -340,6 +400,7 @@ namespace ys
                             Control c = eval_block_box(x.body, scope);
                             if (c.flow == Flow::Break)    break;
                             if (c.flow == Flow::Return)   return c;
+                            if (c.flow == Flow::Goto)     return c;  // target outside loop
                             // cond is evaluated in the scope that includes the
                             // body's locals (Lua §3.3.5).
                             if (eval_scalar(*x.cond, scope).truthy()) break;
@@ -391,6 +452,7 @@ namespace ys
                             Control c = eval_block_box(x.body, scope);
                             if (c.flow == Flow::Break)    break;
                             if (c.flow == Flow::Return)   return c;
+                            if (c.flow == Flow::Goto)     return c;  // target outside loop
                             if (int_loop) ii += is;
                             else           init += step;
                         }
@@ -423,6 +485,7 @@ namespace ys
                             Control c = eval_block_box(x.body, scope);
                             if (c.flow == Flow::Break)    break;
                             if (c.flow == Flow::Return)   return c;
+                            if (c.flow == Flow::Goto)     return c;  // target outside loop
                         }
                         return {};
                     }
@@ -498,11 +561,21 @@ namespace ys
                         }
                         return {};
                     }
-                    else if constexpr (std::is_same_v<T, Goto> ||
-                                       std::is_same_v<T, Label>) {
-                        // Deferred per the M2.0 plan (clear error, not silent).
-                        throw LuaError("goto/labels are not yet supported",
-                                       node.start());
+                    else if constexpr (std::is_same_v<T, Goto>) {
+                        // Emit a Goto control signal; eval_block resolves it
+                        // against the per-block label cache, or propagates it
+                        // outward. A goto that escapes its function/chunk is
+                        // reported as "no visible label" by call_value/run.
+                        Control c;
+                        c.flow = Flow::Goto;
+                        c.label = x.label;
+                        c.off = node.start();
+                        return c;
+                    }
+                    else if constexpr (std::is_same_v<T, Label>) {
+                        // ::name:: is a no-op as a statement; eval_block's label
+                        // cache is what makes it a jump target.
+                        return {};
                     }
                     else if constexpr (std::is_same_v<T, Nil> ||
                                        std::is_same_v<T, Skip>) {
@@ -589,48 +662,134 @@ namespace ys
                         }
                         LuaValue rhs = eval_scalar(*x.rhs, env);
                         std::size_t off = x.start;
+                        using K = BinOpKind;
                         switch (x.op) {
-                        case BinOpKind::Add:     return arith_add(lhs, rhs, off);
-                        case BinOpKind::Sub:     return arith_sub(lhs, rhs, off);
-                        case BinOpKind::Mul:     return arith_mul(lhs, rhs, off);
-                        case BinOpKind::Div:     return arith_div(lhs, rhs, off);
-                        case BinOpKind::FloorDiv:return arith_idiv(lhs, rhs, off);
-                        case BinOpKind::Mod:     return arith_mod(lhs, rhs, off);
-                        case BinOpKind::Pow:     return arith_pow(lhs, rhs, off);
-                        case BinOpKind::BAnd:    return arith_band(lhs, rhs, off);
-                        case BinOpKind::BOr:     return arith_bor (lhs, rhs, off);
-                        case BinOpKind::BXor:    return arith_bxor(lhs, rhs, off);
-                        case BinOpKind::Shl:     return arith_shl (lhs, rhs, off);
-                        case BinOpKind::Shr:     return arith_shr (lhs, rhs, off);
-                        case BinOpKind::Concat: {
-                            if (!concat_ok(lhs))
-                                throw LuaError(
-                                    std::string("attempt to concatenate a ") +
-                                    type_name(lhs) + " value", off);
-                            if (!concat_ok(rhs))
-                                throw LuaError(
-                                    std::string("attempt to concatenate a ") +
-                                    type_name(rhs) + " value", off);
-                            std::string s = concat_part(lhs) + concat_part(rhs);
-                            return LuaValue::str(m_heap.make_string(std::move(s)));
+                        // --- arithmetic: raw when both numbers, else metamethod ---
+                        case K::Add: case K::Sub: case K::Mul:
+                        case K::Div: case K::FloorDiv:
+                        case K::Mod: case K::Pow: {
+                            if (both_numbers(lhs, rhs)) {
+                                switch (x.op) {
+                                case K::Add:     return arith_add(lhs, rhs, off);
+                                case K::Sub:     return arith_sub(lhs, rhs, off);
+                                case K::Mul:     return arith_mul(lhs, rhs, off);
+                                case K::Div:     return arith_div(lhs, rhs, off);
+                                case K::FloorDiv:return arith_idiv(lhs, rhs, off);
+                                case K::Mod:     return arith_mod(lhs, rhs, off);
+                                case K::Pow:     return arith_pow(lhs, rhs, off);
+                                default: break;
+                                }
+                            }
+                            const char* ev =
+                                x.op==K::Add ? "__add" :
+                                x.op==K::Sub ? "__sub" :
+                                x.op==K::Mul ? "__mul" :
+                                x.op==K::Div ? "__div" :
+                                x.op==K::FloorDiv ? "__idiv" :
+                                x.op==K::Mod  ? "__mod" : "__pow";
+                            LuaValue mm = getmetamethod_bin(lhs, rhs, ev);
+                            if (!mm.is_nil())
+                                return call_metamethod(mm, {lhs, rhs}, off);
+                            throw LuaError("attempt to perform arithmetic on a " +
+                                           std::string(type_name(
+                                               lhs.is_number() ? rhs : lhs)) +
+                                           " value", off);
                         }
-                        case BinOpKind::Eq: return LuaValue::boolean(raw_equal(lhs, rhs));
-                        case BinOpKind::Ne: return LuaValue::boolean(!raw_equal(lhs, rhs));
-                        case BinOpKind::Lt: return LuaValue::boolean(raw_cmp(lhs, rhs, off) < 0);
-                        case BinOpKind::Le: return LuaValue::boolean(raw_cmp(lhs, rhs, off) <= 0);
-                        case BinOpKind::Gt: return LuaValue::boolean(raw_cmp(lhs, rhs, off) > 0);
-                        case BinOpKind::Ge: return LuaValue::boolean(raw_cmp(lhs, rhs, off) >= 0);
+                        // --- bitwise: raw when both ints, else metamethod ---
+                        case K::BAnd: case K::BOr: case K::BXor:
+                        case K::Shl: case K::Shr: {
+                            if (both_ints(lhs, rhs)) {
+                                switch (x.op) {
+                                case K::BAnd: return arith_band(lhs, rhs, off);
+                                case K::BOr:  return arith_bor (lhs, rhs, off);
+                                case K::BXor: return arith_bxor(lhs, rhs, off);
+                                case K::Shl:  return arith_shl (lhs, rhs, off);
+                                case K::Shr:  return arith_shr (lhs, rhs, off);
+                                default: break;
+                                }
+                            }
+                            const char* ev =
+                                x.op==K::BAnd ? "__band" :
+                                x.op==K::BOr  ? "__bor"  :
+                                x.op==K::BXor ? "__bxor" :
+                                x.op==K::Shl  ? "__shl"  : "__shr";
+                            LuaValue mm = getmetamethod_bin(lhs, rhs, ev);
+                            if (!mm.is_nil())
+                                return call_metamethod(mm, {lhs, rhs}, off);
+                            throw LuaError("attempt to perform bitwise operation "
+                                           "on a " +
+                                           std::string(type_name(
+                                               lhs.is_int() ? rhs : lhs)) +
+                                           " value", off);
+                        }
+                        // --- concatenation ---
+                        case K::Concat: {
+                            if (concat_ok(lhs) && concat_ok(rhs)) {
+                                std::string s = concat_part(lhs) +
+                                                concat_part(rhs);
+                                return LuaValue::str(
+                                    m_heap.make_string(std::move(s)));
+                            }
+                            LuaValue mm = getmetamethod_bin(lhs, rhs, "__concat");
+                            if (!mm.is_nil())
+                                return call_metamethod(mm, {lhs, rhs}, off);
+                            const LuaValue& bad = !concat_ok(lhs) ? lhs : rhs;
+                            throw LuaError(
+                                std::string("attempt to concatenate a ") +
+                                type_name(bad) + " value", off);
+                        }
+                        // --- equality (a>b derived as b<a, etc.) ---
+                        case K::Eq: return LuaValue::boolean(eq_meta(lhs, rhs, off));
+                        case K::Ne: return LuaValue::boolean(!eq_meta(lhs, rhs, off));
+                        case K::Lt: return LuaValue::boolean(lt_meta(lhs, rhs, off));
+                        case K::Le: return LuaValue::boolean(le_meta(lhs, rhs, off));
+                        case K::Gt: return LuaValue::boolean(lt_meta(rhs, lhs, off));
+                        case K::Ge: return LuaValue::boolean(le_meta(rhs, lhs, off));
                         }
                         throw LuaError("unknown binary operator", off);
                     }
                     else if constexpr (std::is_same_v<T, UnOp>) {
                         LuaValue operand = eval_scalar(*x.operand, env);
                         std::size_t off = x.start;
+                        using U = UnOpKind;
                         switch (x.op) {
-                        case UnOpKind::Neg: return arith_unm(operand, off);
-                        case UnOpKind::Not: return arith_not(operand);
-                        case UnOpKind::Len: return arith_len(operand, off);
-                        case UnOpKind::BNot: return arith_bnot(operand, off);
+                        case U::Neg: {
+                            if (operand.is_number())
+                                return arith_unm(operand, off);
+                            LuaValue mm = getmetamethod(operand, "__unm");
+                            if (!mm.is_nil())
+                                return call_metamethod(mm, {operand, operand}, off);
+                            throw LuaError("attempt to perform arithmetic on a " +
+                                           std::string(type_name(operand)) +
+                                           " value", off);
+                        }
+                        case U::BNot: {
+                            if (operand.is_int())
+                                return arith_bnot(operand, off);
+                            LuaValue mm = getmetamethod(operand, "__bnot");
+                            if (!mm.is_nil())
+                                return call_metamethod(mm, {operand, operand}, off);
+                            throw LuaError("attempt to perform bitwise operation "
+                                           "on a " +
+                                           std::string(type_name(operand)) +
+                                           " value", off);
+                        }
+                        case U::Len: {
+                            // Strings always use raw length (no metatable in
+                            // M2.1). Tables: __len wins if present, else raw
+                            // border. Anything else needs __len or errors.
+                            if (operand.is_str())
+                                return arith_len(operand, off);
+                            LuaValue mm = getmetamethod(operand, "__len");
+                            if (!mm.is_nil())
+                                return call_metamethod(mm, {operand}, off);
+                            if (operand.is_table())
+                                return arith_len(operand, off);
+                            throw LuaError("attempt to get length of a " +
+                                           std::string(type_name(operand)) +
+                                           " value", off);
+                        }
+                        case U::Not: return arith_not(operand);
                         }
                         throw LuaError("unknown unary operator", off);
                     }
@@ -795,9 +954,16 @@ namespace ys
         ValueVec Evaluator::call_value(const LuaValue& f, ValueVec args,
                                        std::size_t off)
         {
-            if (!f.is_callable())
-                throw LuaError("attempt to call a " +
-                               std::string(type_name(f)) + " value", off);
+            if (!f.is_callable()) {
+                // __call metamethod: Lua calls __call(f, ...) — the original
+                // (non-callable) value becomes the first argument.
+                LuaValue mm = getmetamethod(f, "__call");
+                if (!mm.is_callable())
+                    throw LuaError("attempt to call a " +
+                                   std::string(type_name(f)) + " value", off);
+                args.insert(args.begin(), f);
+                return call_value(mm, std::move(args), off);
+            }
             if (f.is_builtin())
                 return f.as_builtin()->fn(*this, std::move(args));
 
@@ -830,6 +996,9 @@ namespace ys
             --m_depth;
             if (c.flow == Flow::Return)
                 return std::move(c.vals);
+            if (c.flow == Flow::Goto)
+                throw LuaError("no visible label '" + c.label +
+                               "' for <goto>", c.off);
             return {};   // fell off the end -> no values
         }
 
@@ -841,22 +1010,143 @@ namespace ys
             return call_value(f, std::move(args), c.start);
         }
 
-        // Indexing reads. Tables use LuaKey lookup (Step 6); strings error for
-        // now (string indexing needs the string library, M3). A Field access
-        // `t.k` is `t["k"]`.
+        // -------------------------------------------------------------------
+        // Metatable support (M2.1)
+        // -------------------------------------------------------------------
+        Table* Evaluator::metatable_of(const LuaValue& v) noexcept
+        {
+            if (v.is_table())   return v.as_table()->metatable;
+            if (v.is_closure()) return v.as_closure()->metatable;
+            return nullptr;   // scalars + strings have no metatable in M2.1
+        }
+
+        LuaValue Evaluator::getmetamethod(const LuaValue& v, std::string_view ev)
+        {
+            Table* mt = metatable_of(v);
+            if (!mt) return LuaValue::nil();
+            // Build a temporary string-key LuaKey (no GC allocation). All
+            // metamethod names are short, so SSO keeps this on the stack.
+            LuaKey k;
+            k.k = LuaKey::K::Str;
+            k.s = std::string{ev};
+            auto it = mt->hash.find(k);
+            return it == mt->hash.end() ? LuaValue::nil() : it->second;
+        }
+
+        LuaValue Evaluator::getmetamethod_bin(const LuaValue& a, const LuaValue& b,
+                                              std::string_view ev)
+        {
+            // Lua's rule: the left operand's metamethod takes precedence; the
+            // right's is consulted only if the left has none for this event.
+            LuaValue mm = getmetamethod(a, ev);
+            if (!mm.is_nil()) return mm;
+            return getmetamethod(b, ev);
+        }
+
+        LuaValue Evaluator::call_metamethod(const LuaValue& mm, ValueVec args,
+                                            std::size_t off)
+        {
+            ValueVec r = call_value(mm, std::move(args), off);
+            return r.empty() ? LuaValue::nil() : r.front();
+        }
+
+        LuaValue Evaluator::stringify(const LuaValue& v, std::size_t off)
+        {
+            // __tostring metamethod: must return a string (Lua raises otherwise).
+            LuaValue mm = getmetamethod(v, "__tostring");
+            if (!mm.is_nil()) {
+                LuaValue r = call_metamethod(mm, {v}, off);
+                if (!r.is_str())
+                    throw LuaError("'__tostring' must return a string", off);
+                return r;
+            }
+            return LuaValue::str(m_heap.make_string(value_to_string(v)));
+        }
+
+        // Equality: raw equality covers numbers (cross-subtype), strings, nil,
+        // bool, and identical objects. __eq fires only for distinct tables or
+        // distinct closures that are not raw-equal (Lua §3.4.4).
+        bool Evaluator::eq_meta(const LuaValue& a, const LuaValue& b,
+                                std::size_t off)
+        {
+            if (raw_equal(a, b)) return true;
+            const bool obj_pair =
+                (a.is_table() && b.is_table()) ||
+                (a.is_closure() && b.is_closure());
+            if (!obj_pair) return false;
+            LuaValue mm = getmetamethod_bin(a, b, "__eq");
+            if (mm.is_nil()) return false;
+            return call_metamethod(mm, {a, b}, off).truthy();
+        }
+
+        bool Evaluator::lt_meta(const LuaValue& a, const LuaValue& b,
+                                std::size_t off)
+        {
+            if ((a.is_number() && b.is_number()) ||
+                (a.is_str() && b.is_str()))
+                return raw_cmp(a, b, off) < 0;
+            LuaValue mm = getmetamethod_bin(a, b, "__lt");
+            if (!mm.is_nil())
+                return call_metamethod(mm, {a, b}, off).truthy();
+            throw LuaError("attempt to compare " +
+                           std::string(type_name(a)) + " with " +
+                           std::string(type_name(b)), off);
+        }
+
+        bool Evaluator::le_meta(const LuaValue& a, const LuaValue& b,
+                                std::size_t off)
+        {
+            if ((a.is_number() && b.is_number()) ||
+                (a.is_str() && b.is_str()))
+                return raw_cmp(a, b, off) <= 0;
+            // __le; Lua falls back to `not (b < a)` via __lt when __le is absent.
+            LuaValue mm = getmetamethod_bin(a, b, "__le");
+            if (!mm.is_nil())
+                return call_metamethod(mm, {a, b}, off).truthy();
+            LuaValue mmlt = getmetamethod_bin(a, b, "__lt");
+            if (!mmlt.is_nil())
+                return !call_metamethod(mmlt, {b, a}, off).truthy();
+            throw LuaError("attempt to compare " +
+                           std::string(type_name(a)) + " with " +
+                           std::string(type_name(b)), off);
+        }
+
+        // Indexing reads. Tables use LuaKey lookup; a read miss consults
+        // __index (M2.1). A Field access `t.k` is `t["k"]`.
         LuaValue Evaluator::index_get(const LuaValue& obj, const LuaValue& key,
                                       std::size_t off)
         {
-            (void)off;
-            if (obj.is_table()) {
-                LuaKey k;
-                if (!to_key(key, k)) return LuaValue::nil();   // nil/NaN key -> nil
-                auto it = obj.as_table()->hash.find(k);
-                return it == obj.as_table()->hash.end() ? LuaValue::nil()
-                                                        : it->second;
+            // Non-table obj: only a __index metamethod can make this succeed
+            // (strings would use the string metatable in M3; for now they have
+            // none, so indexing them raises).
+            if (!obj.is_table()) {
+                LuaValue ev = getmetamethod(obj, "__index");
+                if (ev.is_nil())
+                    throw LuaError("attempt to index a " +
+                                   std::string(type_name(obj)) + " value", off);
+                if (ev.is_table()) return index_get(ev, key, off);
+                return call_metamethod(ev, {obj, key}, off);
             }
-            // Strings/other types: indexing needs metatables/string lib (M3).
-            return LuaValue::nil();
+            // obj is a table: walk the __index chain iteratively so a cyclic
+            // prototype chain can't overflow the C stack. Each step: try the
+            // raw slot (a non-nil value wins); on a miss, follow __index.
+            LuaValue cur = obj;
+            for (int depth = 0; depth < 100; ++depth) {
+                if (!cur.is_table()) break;   // defensive; __index table checked
+                Table* t = cur.as_table();
+                LuaKey k;
+                if (to_key(key, k)) {
+                    auto it = t->hash.find(k);
+                    if (it != t->hash.end() && !it->second.is_nil())
+                        return it->second;
+                }
+                // Miss: consult cur's __index.
+                LuaValue ev = getmetamethod(cur, "__index");
+                if (ev.is_nil()) return LuaValue::nil();
+                if (ev.is_table()) { cur = ev; continue; }   // walk into table
+                return call_metamethod(ev, {cur, key}, off);  // function(cur, key)
+            }
+            throw LuaError("'__index' chain too long; possible loop", off);
         }
 
         LuaValue Evaluator::index_get(const LuaValue& obj, std::string_view key,
@@ -867,23 +1157,50 @@ namespace ys
                              off);
         }
 
-        // Table store. Rejects nil/NaN keys (Lua: silently dropped for nil,
-        // error for NaN). Recomputes the border lazily on #.
+        // Table store. A non-nil raw slot always wins (overwrite); a miss on a
+        // nil-valued/absent slot consults __newindex. nil/NaN keys: nil is a
+        // silent no-op, NaN errors. Iterative over the __newindex-table chain
+        // to bound against cyclic metatables.
         void Evaluator::index_set(const LuaValue& obj, const LuaValue& key,
                                   LuaValue v, std::size_t off)
         {
-            (void)off;
-            if (!obj.is_table())
-                throw LuaError("attempt to index a " +
-                               std::string(type_name(obj)) + " value", off);
-            Table* t = obj.as_table();
-            LuaKey k;
-            if (!to_key(key, k)) {
-                if (key.is_nil()) return;   // t[nil] = v is a no-op in Lua
-                throw LuaError("table index is NaN", off);
+            if (!obj.is_table()) {
+                LuaValue ev = getmetamethod(obj, "__newindex");
+                if (ev.is_nil())
+                    throw LuaError("attempt to index a " +
+                                   std::string(type_name(obj)) + " value", off);
+                if (ev.is_table()) { index_set(ev, key, v, off); return; }
+                call_metamethod(ev, {obj, key, v}, off);
+                return;
             }
-            if (v.is_nil()) t->hash.erase(k);
-            else            t->hash[k] = v;
+            LuaValue cur = obj;
+            for (int depth = 0; depth < 100; ++depth) {
+                if (!cur.is_table()) break;   // defensive
+                Table* t = cur.as_table();
+                LuaKey k;
+                if (!to_key(key, k)) {
+                    // nil key: silent no-op; NaN: error.
+                    if (key.is_nil()) return;
+                    throw LuaError("table index is NaN", off);
+                }
+                auto it = t->hash.find(k);
+                if (it != t->hash.end() && !it->second.is_nil()) {
+                    // Existing non-nil raw slot: raw write wins (Lua §2.4).
+                    if (v.is_nil()) t->hash.erase(it);
+                    else            it->second = v;
+                    return;
+                }
+                // Slot absent/nil: consult __newindex before inserting.
+                LuaValue ev = getmetamethod(cur, "__newindex");
+                if (ev.is_nil()) {
+                    if (!v.is_nil()) t->hash[k] = v;   // raw insert
+                    return;
+                }
+                if (ev.is_table()) { cur = ev; continue; }   // walk into table
+                call_metamethod(ev, {cur, key, v}, off);      // function(cur, key, v)
+                return;
+            }
+            throw LuaError("'__newindex' chain too long; possible loop", off);
         }
 
         // -------------------------------------------------------------------

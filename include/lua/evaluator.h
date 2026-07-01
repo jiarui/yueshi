@@ -41,11 +41,16 @@ namespace ys
 
         // Non-local control flow carried out of statement evaluation. Normal
         // completion is Flow::Normal; loops catch Break; call frames catch
-        // Return and extract its values.
-        enum class Flow : std::uint8_t { Normal, Break, Return };
+        // Return and extract its values; eval_block catches Goto and resumes at
+        // the matching Label (or propagates it outward to be caught by an
+        // enclosing block, or reported as "no visible label" at a frame/chunk
+        // boundary in call_value/run).
+        enum class Flow : std::uint8_t { Normal, Break, Return, Goto };
         struct Control {
             Flow flow{Flow::Normal};
-            ValueVec vals;   // populated only for Return
+            ValueVec vals;          // populated only for Return
+            std::string label;      // populated only for Goto
+            std::size_t off{0};     // Goto's source offset (for diagnostics)
         };
 
         class Evaluator {
@@ -71,12 +76,29 @@ namespace ys
             // construction; idempotent.
             void install_builtins();
 
+            // Convert a value to a string value, consulting __tostring if the
+            // value has one (used by the tostring/print builtins). Allocates the
+            // result String on the heap. `off` is attached to any error raised.
+            LuaValue stringify(const LuaValue& v, std::size_t off);
+
         private:
             Heap&          m_heap;
             std::ostream*  m_out;
             Environment*   m_globals;       // non-owning; Heap owns it
             std::size_t    m_depth{0};
             const peg::SourceMap* m_map{nullptr};  // optional, for error locations
+
+            // Per-block label cache (M2.2): maps a Block* to {name -> index in
+            // stmts}. Built lazily on first eval_block entry, then preserved for
+            // the run so re-entered loop/function bodies don't rescan. Cleared
+            // at the top of run() so successive chunks can't observe stale
+            // pointers (a freed AST would dangle). Last-wins on duplicate labels
+            // (matches the runtime-only v1 stance; Lua rejects at compile time).
+            struct LabelCache {
+                std::unordered_map<std::string, std::size_t> m;
+                bool built{false};
+            };
+            std::unordered_map<const Block*, LabelCache> m_labels;
 
             // Statement/expression evaluation (defined in evaluator.cpp).
             Control  eval_block(const Block&, Environment*);
@@ -120,6 +142,29 @@ namespace ys
             // lazily (# recomputes when needed).
             void index_set(const LuaValue& obj, const LuaValue& key,
                            LuaValue v, std::size_t off);
+
+            // --- Metatable support (M2.1) ---
+            // The metatable of a table/closure value, or nullptr. Scalars and
+            // strings have no metatable in M2.1 (string metatables are M3).
+            Table* metatable_of(const LuaValue& v) noexcept;
+            // Look up a metamethod `ev` (e.g. "__add") on v's metatable. Raw
+            // lookup (no recursion), returns nil if absent. Allocation-free:
+            // builds a temporary LuaKey, not a String object.
+            LuaValue getmetamethod(const LuaValue& v, std::string_view ev);
+            // For binary ops: Lua checks the left operand's metamethod first,
+            // then the right's. Returns the first present, else nil.
+            LuaValue getmetamethod_bin(const LuaValue& a, const LuaValue& b,
+                                       std::string_view ev);
+            // Call a metamethod value and return its first result (nil if it
+            // returns nothing). The caller has already verified `mm` is present.
+            LuaValue call_metamethod(const LuaValue& mm, ValueVec args,
+                                     std::size_t off);
+            // Equality/ordering WITH metamethods. raw paths for
+            // numbers/strings/nil/bool; __eq (table/closure pairs not raw-equal),
+            // __lt, and __le (with the `not (b<a)` fallback via __lt).
+            bool eq_meta(const LuaValue& a, const LuaValue& b, std::size_t off);
+            bool lt_meta(const LuaValue& a, const LuaValue& b, std::size_t off);
+            bool le_meta(const LuaValue& a, const LuaValue& b, std::size_t off);
         };
 
     } // namespace lua

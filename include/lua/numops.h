@@ -60,6 +60,14 @@ namespace ys
             return a.is_number() && b.is_number();
         }
 
+        // True if both are integers. Used by the evaluator to decide whether a
+        // raw bitwise op applies (vs. a metamethod fallback). Floats — even
+        // integral-valued ones — are rejected, matching Lua 5.4 §3.4.2.
+        inline bool both_ints(const LuaValue& a, const LuaValue& b) noexcept
+        {
+            return a.is_int() && b.is_int();
+        }
+
         // Core arithmetic, each throwing LuaError on a type error (non-number
         // operand, or float in a bitwise op). The `off` is attached to errors.
         LuaValue arith_add(const LuaValue& a, const LuaValue& b, std::size_t off);

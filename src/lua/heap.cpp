@@ -173,11 +173,15 @@ namespace ys
                 auto* t = static_cast<Table*>(o);
                 for (const auto& [k, v] : t->hash)
                     if (GCObject* c = v.as_gc()) emit(c);
+                if (t->metatable)
+                    emit(static_cast<GCObject*>(t->metatable));
                 break;
             }
             case ObjType::Closure: {
                 auto* c = static_cast<Closure*>(o);
                 if (c->env) emit(static_cast<GCObject*>(c->env));
+                if (c->metatable)
+                    emit(static_cast<GCObject*>(c->metatable));
                 break;
             }
             case ObjType::Env: {
