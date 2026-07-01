@@ -30,11 +30,12 @@ namespace ys
         void Heap::free_one(GCObject* o) noexcept
         {
             switch (o->type) {
-            case ObjType::String:  delete static_cast<String*>(o);      break;
-            case ObjType::Table:   delete static_cast<Table*>(o);       break;
-            case ObjType::Closure: delete static_cast<Closure*>(o);     break;
-            case ObjType::Builtin: delete static_cast<Builtin*>(o);     break;
-            case ObjType::Env:     delete static_cast<Environment*>(o); break;
+            case ObjType::String:    delete static_cast<String*>(o);      break;
+            case ObjType::Table:     delete static_cast<Table*>(o);       break;
+            case ObjType::Closure:   delete static_cast<Closure*>(o);     break;
+            case ObjType::Builtin:   delete static_cast<Builtin*>(o);     break;
+            case ObjType::Env:       delete static_cast<Environment*>(o); break;
+            case ObjType::Userdata:  delete static_cast<Userdata*>(o);    break;
             }
         }
 
@@ -104,6 +105,14 @@ namespace ys
         {
             auto* o = new Environment(parent);
             link(o, ObjType::Env);
+            maybe_collect();
+            return o;
+        }
+
+        Userdata* Heap::make_userdata(std::shared_ptr<void> payload)
+        {
+            auto* o = new Userdata(std::move(payload));
+            link(o, ObjType::Userdata);
             maybe_collect();
             return o;
         }
@@ -224,6 +233,11 @@ namespace ys
                     if (GCObject* c = v.as_gc()) emit(c);
                 break;
             }
+            case ObjType::Userdata: {
+                auto* u = static_cast<Userdata*>(o);
+                if (u->metatable) emit(static_cast<GCObject*>(u->metatable));
+                break;
+            }
             }
             (void)sizeof(Emit);  // silence unused-emit when a branch has none
         }
@@ -258,6 +272,8 @@ namespace ys
                 out.k = LuaKey::K::Ptr; out.ptr = static_cast<GCObject*>(v.d.c); return true;
             case LuaValue::Tag::Builtin:
                 out.k = LuaKey::K::Ptr; out.ptr = static_cast<GCObject*>(v.d.fn); return true;
+            case LuaValue::Tag::Userdata:
+                out.k = LuaKey::K::Ptr; out.ptr = static_cast<GCObject*>(v.d.u); return true;
             }
             return false;
         }

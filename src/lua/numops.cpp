@@ -59,6 +59,7 @@ namespace ys
             case LuaValue::Tag::Table:   return "table";
             case LuaValue::Tag::Closure:
             case LuaValue::Tag::Builtin: return "function";
+            case LuaValue::Tag::Userdata:return "userdata";
             }
             return "unknown";
         }
@@ -73,7 +74,8 @@ namespace ys
             case LuaValue::Tag::Str:  return v.as_str()->data;
             case LuaValue::Tag::Table:
             case LuaValue::Tag::Closure:
-            case LuaValue::Tag::Builtin: {
+            case LuaValue::Tag::Builtin:
+            case LuaValue::Tag::Userdata: {
                 // "table: 0x..." / "function: 0x..." — identity by address.
                 std::ostringstream os;
                 os << type_name(v) << ": " << static_cast<const void*>(v.as_gc());

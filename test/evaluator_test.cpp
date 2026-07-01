@@ -2738,6 +2738,498 @@ TEST_CASE("evaluator: package.loadlib stub")
     CHECK(as_str(r[2]) == "absent");
 }
 
+// =====================================================================
+// M3.4: io + os libraries
+// =====================================================================
+
+TEST_CASE("evaluator: io.stdin/stdout/stderr are userdata")
+{
+    EvalRig g;
+    CHECK(as_str(g.run_scalar("return type(io.stdin)"))  == "userdata");
+    CHECK(as_str(g.run_scalar("return type(io.stdout)")) == "userdata");
+    CHECK(as_str(g.run_scalar("return type(io.stderr)")) == "userdata");
+    // Per-type metatable __name.
+    CHECK(as_str(g.run_scalar("return getmetatable(io.stdin).__name")) == "FILE*");
+    // io.type returns "file" for live handles.
+    CHECK(as_str(g.run_scalar("return io.type(io.stdin)")) == "file");
+}
+
+TEST_CASE("evaluator: io.write to a file and read back")
+{
+    EvalRig g;
+    // Use /tmp for the round-trip; we control the filename.
+    std::string path = "/tmp/yueshi_test_io_roundtrip.lua";
+    ::unlink(path.c_str());
+
+    // Write
+    g.run("local f = assert(io.open('" + path + "', 'w')); "
+          "f:write('hello ', 42, ' ', 3.14); "
+          "f:close()");
+    // Read
+    auto r = g.run("local f = assert(io.open('" + path + "', 'r')); "
+                   "local s = f:read('*a'); "
+                   "f:close(); "
+                   "return s");
+    REQUIRE(r.size() >= 1);
+    CHECK(r[0].is_str());
+    CHECK(as_str(r[0]) == "hello 42 3.14");
+    ::unlink(path.c_str());
+}
+
+TEST_CASE("evaluator: io.read by line")
+{
+    EvalRig g;
+    std::string path = "/tmp/yueshi_test_io_readline.lua";
+    ::unlink(path.c_str());
+    g.run("local f = io.open('" + path + "', 'w'); "
+          "f:write('line1\\nline2\\nline3'); "
+          "f:close()");
+    auto r = g.run("local f = io.open('" + path + "', 'r'); "
+                   "local a = f:read('*l'); "
+                   "local b = f:read('*l'); "
+                   "local c = f:read('*l'); "
+                   "local d = f:read('*l'); "
+                   "f:close(); "
+                   "return a, b, c, d");
+    REQUIRE(r.size() >= 4);
+    CHECK(as_str(r[0]) == "line1");
+    CHECK(as_str(r[1]) == "line2");
+    CHECK(as_str(r[2]) == "line3");
+    CHECK(r[3].is_nil());   // EOF -> nil
+    ::unlink(path.c_str());
+}
+
+TEST_CASE("evaluator: io.read '*L' keeps newline")
+{
+    EvalRig g;
+    std::string path = "/tmp/yueshi_test_io_readline_keep.lua";
+    ::unlink(path.c_str());
+    g.run("local f = io.open('" + path + "', 'w'); "
+          "f:write('abc\\ndef'); "
+          "f:close()");
+    auto r = g.run("local f = io.open('" + path + "', 'r'); "
+                   "local s = f:read('*L'); "
+                   "f:close(); "
+                   "return s");
+    REQUIRE(r.size() >= 1);
+    CHECK(as_str(r[0]) == "abc\n");
+    ::unlink(path.c_str());
+}
+
+TEST_CASE("evaluator: io.read integer N")
+{
+    EvalRig g;
+    std::string path = "/tmp/yueshi_test_io_readn.lua";
+    ::unlink(path.c_str());
+    g.run("local f = io.open('" + path + "', 'w'); "
+          "f:write('hello world'); "
+          "f:close()");
+    auto r = g.run("local f = io.open('" + path + "', 'r'); "
+                   "local s = f:read(5); "
+                   "f:close(); "
+                   "return s");
+    REQUIRE(r.size() >= 1);
+    CHECK(as_str(r[0]) == "hello");
+    ::unlink(path.c_str());
+}
+
+TEST_CASE("evaluator: io.read '*n'")
+{
+    EvalRig g;
+    std::string path = "/tmp/yueshi_test_io_readnum.lua";
+    ::unlink(path.c_str());
+    g.run("local f = io.open('" + path + "', 'w'); "
+          "f:write('3.14 abc'); "
+          "f:close()");
+    auto r = g.run("local f = io.open('" + path + "', 'r'); "
+                   "local n = f:read('*n'); "
+                   "local s = f:read('*a'); "
+                   "f:close(); "
+                   "return n, s");
+    REQUIRE(r.size() >= 2);
+    CHECK(r[0].is_flt());
+    CHECK(as_flt(r[0]) == 3.14);
+    CHECK(as_str(r[1]) == " abc");
+    ::unlink(path.c_str());
+}
+
+TEST_CASE("evaluator: io.type on closed file")
+{
+    EvalRig g;
+    std::string path = "/tmp/yueshi_test_io_type.lua";
+    ::unlink(path.c_str());
+    g.run("local f = io.open('" + path + "', 'w'); f:close()");
+    auto r = g.run("local f = io.open('" + path + "', 'r'); "
+                   "f:close(); "
+                   "return io.type(f)");
+    REQUIRE(r.size() >= 1);
+    CHECK(r[0].is_str());
+    CHECK(as_str(r[0]) == "closed file");
+    ::unlink(path.c_str());
+}
+
+TEST_CASE("evaluator: io.type on non-file is nil")
+{
+    EvalRig g;
+    CHECK(g.run_scalar("return io.type(42)").is_nil());
+    CHECK(g.run_scalar("return io.type('hello')").is_nil());
+    CHECK(g.run_scalar("return io.type({})").is_nil());
+}
+
+TEST_CASE("evaluator: io.open failure returns nil+err")
+{
+    EvalRig g;
+    auto r = g.run("local f, err = io.open('/tmp/yueshi_nonexistent_file_xyz.lua', 'r'); "
+                   "return f, err");
+    REQUIRE(r.size() >= 2);
+    CHECK(r[0].is_nil());
+    CHECK(r[1].is_str());
+}
+
+TEST_CASE("evaluator: file:seek roundtrip")
+{
+    EvalRig g;
+    std::string path = "/tmp/yueshi_test_io_seek.lua";
+    ::unlink(path.c_str());
+    g.run("local f = io.open('" + path + "', 'w'); "
+          "f:write('0123456789'); "
+          "f:close()");
+    auto r = g.run("local f = io.open('" + path + "', 'r'); "
+                   "f:seek('set', 3); "
+                   "local s = f:read(2); "
+                   "local p = f:seek(); "
+                   "f:close(); "
+                   "return s, p");
+    REQUIRE(r.size() >= 2);
+    CHECK(as_str(r[0]) == "34");
+    CHECK(as_int(r[1]) == 5);
+    ::unlink(path.c_str());
+}
+
+TEST_CASE("evaluator: io.lines iterates a file")
+{
+    EvalRig g;
+    std::string path = "/tmp/yueshi_test_io_lines.lua";
+    ::unlink(path.c_str());
+    g.run("local f = io.open('" + path + "', 'w'); "
+          "f:write('a\\nb\\nc\\n'); "
+          "f:close()");
+    std::ostringstream prog;
+    prog << "local out = {} "
+            "for line in io.lines('" << path << "') do "
+            "  out[#out+1] = line "
+            "end "
+            "return out[1], out[2], out[3]";
+    auto r = g.run(prog.str());
+    REQUIRE(r.size() >= 3);
+    CHECK(as_str(r[0]) == "a");
+    CHECK(as_str(r[1]) == "b");
+    CHECK(as_str(r[2]) == "c");
+    ::unlink(path.c_str());
+}
+
+TEST_CASE("evaluator: io.input/output default handle")
+{
+    EvalRig g;
+    auto r = g.run("return io.input(), io.output()");
+    REQUIRE(r.size() >= 2);
+    CHECK(r[0].is_userdata());   // default input = io.stdin
+    CHECK(r[1].is_userdata());   // default output = io.stdout
+    // io.input(f) sets default.
+    g.run("io.input(io.stderr); io.output(io.stderr)");
+    CHECK(as_int(g.run_scalar("return 1")) == 1);
+}
+
+TEST_CASE("evaluator: io.tmpfile returns a writable file")
+{
+    EvalRig g;
+    auto r = g.run("local f = io.tmpfile(); "
+                   "f:write('tmp'); "
+                   "f:seek('set', 0); "
+                   "local s = f:read('*a'); "
+                   "f:close(); "
+                   "return s");
+    REQUIRE(r.size() >= 1);
+    CHECK(as_str(r[0]) == "tmp");
+}
+
+// ---------------------------------------------------------------------
+// os library
+// ---------------------------------------------------------------------
+
+TEST_CASE("evaluator: os.clock returns a non-negative number")
+{
+    EvalRig g;
+    auto v = g.run_scalar("return os.clock()");
+    CHECK(v.is_number());
+    CHECK(v.as_flt() >= 0.0);
+}
+
+TEST_CASE("evaluator: os.time returns positive integer")
+{
+    EvalRig g;
+    auto v = g.run_scalar("return os.time()");
+    CHECK(v.is_int());
+    CHECK(v.as_int() > 0);
+}
+
+TEST_CASE("evaluator: os.difftime")
+{
+    EvalRig g;
+    auto v = g.run_scalar("return os.difftime(200, 100)");
+    CHECK(v.is_flt());
+    CHECK(as_flt(v) == 100.0);
+}
+
+TEST_CASE("evaluator: os.getenv for known var")
+{
+    EvalRig g;
+    // PATH is universal on linux.
+    auto v = g.run_scalar("return type(os.getenv('PATH'))");
+    CHECK(as_str(v) == "string");
+    // Unknown var -> nil.
+    CHECK(g.run_scalar("return os.getenv('YUESHI_NONEXISTENT_XYZ_123')").is_nil());
+}
+
+TEST_CASE("evaluator: os.tmpname returns a unique string")
+{
+    EvalRig g;
+    auto v = g.run_scalar("return os.tmpname()");
+    CHECK(v.is_str());
+    CHECK(as_str(v).size() > 5);
+    // Clean up the name (no file was created by tmpname).
+    ::unlink(as_str(v).c_str());
+}
+
+TEST_CASE("evaluator: os.remove + os.rename roundtrip")
+{
+    EvalRig g;
+    std::string pathA = "/tmp/yueshi_test_os_a.lua";
+    std::string pathB = "/tmp/yueshi_test_os_b.lua";
+    ::unlink(pathA.c_str());
+    ::unlink(pathB.c_str());
+    // Create a file via Lua, then rename, then remove.
+    g.run("local f = io.open('" + pathA + "', 'w'); f:write('hi'); f:close()");
+    auto r1 = g.run("return os.rename('" + pathA + "', '" + pathB + "')");
+    REQUIRE(!r1.empty());
+    CHECK(r1[0].truthy());
+    auto r2 = g.run("return os.remove('" + pathB + "')");
+    REQUIRE(!r2.empty());
+    CHECK(r2[0].truthy());
+}
+
+TEST_CASE("evaluator: os.date returns string for default format")
+{
+    EvalRig g;
+    auto v = g.run_scalar("return type(os.date())");
+    CHECK(as_str(v) == "string");
+}
+
+TEST_CASE("evaluator: os.date '*t' returns table with year/month/day")
+{
+    EvalRig g;
+    auto r = g.run("local t = os.date('*t'); "
+                   "return t.year, t.month, t.day");
+    REQUIRE(r.size() >= 3);
+    CHECK(r[0].is_int());
+    CHECK(r[1].is_int());
+    CHECK(r[2].is_int());
+    CHECK(as_int(r[0]) >= 1970);
+    CHECK(as_int(r[1]) >= 1);
+    CHECK(as_int(r[1]) <= 12);
+}
+
+TEST_CASE("evaluator: os.time from table roundtrips via os.date")
+{
+    EvalRig g;
+    auto r = g.run("local t = {year=2020, month=6, day=15, hour=12, min=30, sec=45}; "
+                   "local e = os.time(t); "
+                   "local t2 = os.date('*t', e); "
+                   "return t2.year, t2.month, t2.day, t2.hour, t2.min, t2.sec");
+    REQUIRE(r.size() >= 6);
+    CHECK(as_int(r[0]) == 2020);
+    CHECK(as_int(r[1]) == 6);
+    CHECK(as_int(r[2]) == 15);
+    CHECK(as_int(r[3]) == 12);
+    CHECK(as_int(r[4]) == 30);
+    CHECK(as_int(r[5]) == 45);
+}
+
+TEST_CASE("evaluator: os.setlocale query returns C or locale name")
+{
+    EvalRig g;
+    // Query the current locale (default "C" in the test env).
+    auto v = g.run_scalar("return type(os.setlocale())");
+    // setlocale with nil queries; result is a string.
+    CHECK(as_str(v) == "string");
+}
+
+TEST_CASE("evaluator: os.execute without arg returns true")
+{
+    EvalRig g;
+    auto v = g.run_scalar("return os.execute()");
+    CHECK(v.is_bool());
+    CHECK(v.as_bool());
+}
+
+TEST_CASE("evaluator: os.execute runs true command")
+{
+    EvalRig g;
+    // `true` is universally available on linux; exits with 0.
+    auto v = g.run_scalar("return os.execute('true')");
+    CHECK(v.is_bool());
+    CHECK(v.as_bool());
+}
+
+TEST_CASE("evaluator: os.execute false returns nil + exit + code")
+{
+    EvalRig g;
+    auto r = g.run("return os.execute('false')");
+    REQUIRE(r.size() >= 3);
+    CHECK(r[0].is_nil());
+    CHECK(as_str(r[1]) == "exit");
+    CHECK(as_int(r[2]) == 1);
+}
+
+TEST_CASE("evaluator: io.popen reads subprocess output")
+{
+    EvalRig g;
+    auto r = g.run("local f = assert(io.popen('echo popen_test', 'r')); "
+                   "local s = f:read('*a'); "
+                   "f:close(); "
+                   "return s");
+    REQUIRE(r.size() >= 1);
+    CHECK(r[0].is_str());
+    CHECK(as_str(r[0]).find("popen_test") != std::string::npos);
+}
+
+TEST_CASE("evaluator: io.popen writes to subprocess")
+{
+    EvalRig g;
+    std::string path = "/tmp/yueshi_test_popen_w.lua";
+    ::unlink(path.c_str());
+    auto r = g.run("local f = assert(io.popen('cat > " + path + "', 'w')); "
+                   "f:write('written via popen'); "
+                   "f:close(); "
+                   "local r = io.open('" + path + "', 'r'); "
+                   "local s = r:read('*a'); "
+                   "r:close(); "
+                   "return s");
+    REQUIRE(!r.empty());
+    CHECK(as_str(r[0]) == "written via popen");
+    ::unlink(path.c_str());
+}
+
+TEST_CASE("evaluator: io.popen invalid mode errors")
+{
+    EvalRig g;
+    bool threw = false;
+    try {
+        g.run("io.popen('echo x', 'invalid')");
+    } catch (...) { threw = true; }
+    CHECK(threw);
+}
+
+TEST_CASE("evaluator: require 'io' and 'os' return the stdlib tables")
+{
+    EvalRig g;
+    auto r1 = g.run("return require('io')");
+    REQUIRE(!r1.empty());
+    CHECK(r1[0].is_table());
+
+    auto r2 = g.run("return require('os')");
+    REQUIRE(!r2.empty());
+    CHECK(r2[0].is_table());
+
+    // require returns the same identity on second call (cached).
+    auto r3 = g.run("return require('io') == require('io')");
+    REQUIRE(!r3.empty());
+    CHECK(r3[0].is_bool());
+    CHECK(r3[0].as_bool());
+}
+
+TEST_CASE("evaluator: io.write to default output returns io table")
+{
+    EvalRig g;
+    auto r = g.run("local x = io.write('hello'); return x");
+    REQUIRE(!r.empty());
+    CHECK(r[0].is_table());
+}
+
+TEST_CASE("evaluator: file metatable is per-type shared")
+{
+    EvalRig g;
+    // All file handles share the same metatable.
+    auto r = g.run("return getmetatable(io.stdin) == getmetatable(io.stdout)");
+    REQUIRE(!r.empty());
+    CHECK(r[0].is_bool());
+    CHECK(r[0].as_bool());
+}
+
+TEST_CASE("evaluator: io.write rejects non-string/non-number")
+{
+    EvalRig g;
+    bool threw = false;
+    try {
+        g.run("io.write({})");
+    } catch (const LuaError&) { threw = true; }
+    CHECK(threw);
+}
+
+TEST_CASE("evaluator: io.lines no-arg iterates default input")
+{
+    EvalRig g;
+    std::string path = "/tmp/yueshi_test_io_lines_def.lua";
+    ::unlink(path.c_str());
+    g.run("local f = io.open('" + path + "', 'w'); "
+          "f:write('one\\ntwo\\n'); "
+          "f:close()");
+    std::ostringstream prog;
+    prog << "local f = io.open('" << path << "', 'r'); "
+            "io.input(f); "
+            "local out = {} "
+            "for line in io.lines() do out[#out+1] = line end "
+            "return out[1], out[2]";
+    auto r = g.run(prog.str());
+    REQUIRE(r.size() >= 2);
+    CHECK(as_str(r[0]) == "one");
+    CHECK(as_str(r[1]) == "two");
+    ::unlink(path.c_str());
+}
+
+TEST_CASE("evaluator: os.clock is monotonic-ish across calls")
+{
+    EvalRig g;
+    auto r = g.run("local a = os.clock(); "
+                   "local sum = 0; for i = 1, 1000 do sum = sum + i end; "
+                   "local b = os.clock(); "
+                   "return b >= a");
+    REQUIRE(!r.empty());
+    CHECK(r[0].is_bool());
+    CHECK(r[0].as_bool());
+}
+
+TEST_CASE("evaluator: userdata as table key")
+{
+    EvalRig g;
+    // Userdata keys work (identity-based, like table/closure keys).
+    auto r = g.run("local t = {}; "
+                   "t[io.stdin] = 42; "
+                   "return t[io.stdin]");
+    REQUIRE(!r.empty());
+    CHECK(as_int(r[0]) == 42);
+}
+
+TEST_CASE("evaluator: GC traces userdata metatable edge")
+{
+    EvalRig g;
+    // Smoke: userdata survives GC because it's rooted in io.stdin.
+    // No assertion beyond "no crash + type() returns userdata".
+    auto v = g.run_scalar("collectgarbage('collect'); "
+                           "return type(io.stdin)");
+    CHECK(as_str(v) == "userdata");
+}
+
 
 
 

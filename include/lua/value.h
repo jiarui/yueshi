@@ -20,6 +20,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -42,7 +43,7 @@ namespace ys
         // reference Lua's choice for GC'd objects).
         // -------------------------------------------------------------------
         enum class ObjType : std::uint8_t {
-            String, Table, Closure, Builtin, Env
+            String, Table, Closure, Builtin, Env, Userdata
         };
 
         struct GCObject {
@@ -59,6 +60,7 @@ namespace ys
         struct Closure;
         struct Builtin;
         struct Environment;
+        struct Userdata;
 
         // -------------------------------------------------------------------
         // LuaValue: the by-value tagged union. Holds NO ownership — object
@@ -68,7 +70,7 @@ namespace ys
         // -------------------------------------------------------------------
         struct LuaValue {
             enum class Tag : std::uint8_t {
-                Nil, Bool, Int, Flt, Str, Table, Closure, Builtin
+                Nil, Bool, Int, Flt, Str, Table, Closure, Builtin, Userdata
             };
             Tag tag{Tag::Nil};
             union Data {
@@ -79,6 +81,7 @@ namespace ys
                 Table*     t;
                 Closure*   c;
                 Builtin*   fn;
+                Userdata*  u;
             } d{};   // value-initialized -> zero bytes (well-defined for Nil)
 
             LuaValue() = default;
@@ -92,6 +95,7 @@ namespace ys
             static LuaValue table(Table* x)          { LuaValue v; v.tag = Tag::Table;  v.d.t = x;     return v; }
             static LuaValue closure(Closure* x)      { LuaValue v; v.tag = Tag::Closure;v.d.c = x;     return v; }
             static LuaValue builtin(Builtin* x)      { LuaValue v; v.tag = Tag::Builtin;v.d.fn = x;    return v; }
+            static LuaValue userdata(Userdata* x)    { LuaValue v; v.tag = Tag::Userdata; v.d.u = x;   return v; }
 
             bool is_nil() const noexcept      { return tag == Tag::Nil; }
             bool is_bool() const noexcept     { return tag == Tag::Bool; }
@@ -102,6 +106,7 @@ namespace ys
             bool is_table() const noexcept    { return tag == Tag::Table; }
             bool is_closure() const noexcept  { return tag == Tag::Closure; }
             bool is_builtin() const noexcept  { return tag == Tag::Builtin; }
+            bool is_userdata() const noexcept { return tag == Tag::Userdata; }
             bool is_callable() const noexcept { return is_closure() || is_builtin(); }
 
             bool       as_bool() const noexcept     { return d.b; }
@@ -111,6 +116,7 @@ namespace ys
             Table*     as_table() const noexcept    { return d.t; }
             Closure*   as_closure() const noexcept  { return d.c; }
             Builtin*   as_builtin() const noexcept  { return d.fn; }
+            Userdata*  as_userdata() const noexcept { return d.u; }
 
             // If this value holds a GC object, return its GCObject* (for the
             // tracer); otherwise nullptr. Scalars are never traced.
@@ -227,6 +233,20 @@ namespace ys
             Builtin(std::string n, BuiltinFn f) : GCObject{}, name(std::move(n)), fn(f) {}
         };
 
+        // Full userdata: an opaque GC object with a type-erased payload + a
+        // per-object metatable. The payload is a shared_ptr<void> so multiple
+        // references (e.g. io.input() returning the current default handle)
+        // alias the same underlying resource, and so the dtor (run by sweep)
+        // cleans up the C++ resource deterministically from the GC's perspective
+        // — a safety net ahead of M4's __gc/__close finalizer integration.
+        // Per-type metatables (registry-based, like Lua) are M3.7; for now
+        // every userdata carries its own metatable pointer (like Table does).
+        struct Userdata : GCObject {
+            std::shared_ptr<void> payload;
+            Table*                metatable{nullptr};
+            explicit Userdata(std::shared_ptr<void> p) : GCObject{}, payload(std::move(p)) {}
+        };
+
         // A scope is itself a GC object: a closure can escape its defining frame
         // (`return function() return x end`), so a scope's lifetime is not the
         // C stack frame. Making Environment traceable (vars + parent + varargs)
@@ -247,11 +267,12 @@ namespace ys
         inline GCObject* LuaValue::as_gc() const noexcept
         {
             switch (tag) {
-            case Tag::Str:     return static_cast<GCObject*>(d.s);
-            case Tag::Table:   return static_cast<GCObject*>(d.t);
-            case Tag::Closure: return static_cast<GCObject*>(d.c);
-            case Tag::Builtin: return static_cast<GCObject*>(d.fn);
-            default:           return nullptr;
+            case Tag::Str:      return static_cast<GCObject*>(d.s);
+            case Tag::Table:    return static_cast<GCObject*>(d.t);
+            case Tag::Closure:  return static_cast<GCObject*>(d.c);
+            case Tag::Builtin:  return static_cast<GCObject*>(d.fn);
+            case Tag::Userdata: return static_cast<GCObject*>(d.u);
+            default:            return nullptr;
             }
         }
 

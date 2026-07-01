@@ -396,6 +396,8 @@ namespace ys
                 seed("string");
                 seed("math");
                 seed("table");
+                seed("io");
+                seed("os");
                 // _G
                 LuaKey ggk; ggk.k = LuaKey::K::Str; ggk.s = "_G";
                 auto git = ev.globals().hash.find(ggk);

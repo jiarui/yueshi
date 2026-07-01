@@ -16,6 +16,54 @@ function(yueshi_test_enable_sanitizers target)
     endif()
 endfunction()
 
+# The standard library + runtime TUs shared by every evaluator-driving test
+# target. Kept in one place so adding a new lib (utf8, debug, ...) doesn't
+# require touching every target definition.
+set(yueshi_eval_tus
+    ../src/lua/state.cpp
+    ../src/lua/evaluator.cpp
+    ../src/lua/compile.cpp
+    ../src/lua/goto_check.cpp
+    ../src/lua/strlib.cpp
+    ../src/lua/tablib.cpp
+    ../src/lua/mathlib.cpp
+    ../src/lua/iolib.cpp
+    ../src/lua/oslib.cpp
+    ../src/lua/packagelib.cpp
+    ../src/lua/pattern.cpp
+    ../src/lua/numops.cpp
+    ../src/lua/heap.cpp
+    ../src/lua/parser.cpp
+    ../src/lua/lex.cpp)
+
+# Helper: declare a test target that compiles `main_src` + the shared
+# evaluator TUs, links peglib + doctest, optionally defines YUESHI_CORPUS_DIR,
+# registers with ctest.
+function(yueshi_eval_test name main_src)
+    cmake_parse_arguments(ARG
+        "WITHOUT_STATE"          # one-value options
+        "CORPUS_DIR"             # single-value
+        ""                       # multi-value
+        ${ARGN})
+    if(ARG_WITHOUT_STATE)
+        set(tus ${yueshi_eval_tus})
+        list(REMOVE_ITEM tus ../src/lua/state.cpp)
+    else()
+        set(tus ${yueshi_eval_tus})
+    endif()
+    add_executable(${name} ${main_src} ${tus})
+    target_link_libraries(${name} PRIVATE peglib yueshi_test_main)
+    target_include_directories(${name} PRIVATE
+        ${doctest_include_dir}
+        ${CMAKE_SOURCE_DIR}/include)
+    if(ARG_CORPUS_DIR)
+        target_compile_definitions(${name} PRIVATE
+            YUESHI_CORPUS_DIR="${ARG_CORPUS_DIR}")
+    endif()
+    yueshi_test_enable_sanitizers(${name})
+    add_test(NAME ${name} COMMAND ${name})
+endfunction()
+
 # Lexer unit tests: existing cases + the correctness/regression suite.
 add_executable(yueshi_lua_lex_test
     test.cpp
@@ -75,81 +123,22 @@ add_test(NAME yueshi_lua_gc_test COMMAND yueshi_lua_gc_test)
 
 # Evaluator unit tests: lex -> parse -> Evaluator::run, assert on returned
 # LuaValues. The evaluator + heap + parser + lex TUs compile in here.
-add_executable(yueshi_lua_evaluator_test
-    evaluator_test.cpp
-    ../src/lua/evaluator.cpp
-    ../src/lua/compile.cpp
-    ../src/lua/goto_check.cpp
-    ../src/lua/strlib.cpp
-    ../src/lua/tablib.cpp
-    ../src/lua/mathlib.cpp
-    ../src/lua/packagelib.cpp
-    ../src/lua/pattern.cpp
-    ../src/lua/numops.cpp
-    ../src/lua/heap.cpp
-    ../src/lua/parser.cpp
-    ../src/lua/lex.cpp)
-target_link_libraries(yueshi_lua_evaluator_test PRIVATE peglib yueshi_test_main)
-target_include_directories(yueshi_lua_evaluator_test PRIVATE
-    ${doctest_include_dir}
-    ${CMAKE_SOURCE_DIR}/include)
-target_compile_definitions(yueshi_lua_evaluator_test PRIVATE
-    YUESHI_CORPUS_DIR="${CMAKE_SOURCE_DIR}/test/corpus")
-yueshi_test_enable_sanitizers(yueshi_lua_evaluator_test)
-add_test(NAME yueshi_lua_evaluator_test COMMAND yueshi_lua_evaluator_test)
+yueshi_eval_test(yueshi_lua_evaluator_test evaluator_test.cpp
+    WITHOUT_STATE
+    CORPUS_DIR "${CMAKE_SOURCE_DIR}/test/corpus")
 
 # string.pack/unpack/packsize corpus acceptance: run the official tpack.lua
 # end-to-end through the evaluator. High-leverage gate for M3.2.5 (~420
 # runtime assertions in a single file).
-add_executable(yueshi_lua_pack_corpus
-    pack_corpus.cpp
-    ../src/lua/evaluator.cpp
-    ../src/lua/compile.cpp
-    ../src/lua/goto_check.cpp
-    ../src/lua/strlib.cpp
-    ../src/lua/tablib.cpp
-    ../src/lua/mathlib.cpp
-    ../src/lua/packagelib.cpp
-    ../src/lua/pattern.cpp
-    ../src/lua/numops.cpp
-    ../src/lua/heap.cpp
-    ../src/lua/parser.cpp
-    ../src/lua/lex.cpp)
-target_link_libraries(yueshi_lua_pack_corpus PRIVATE peglib yueshi_test_main)
-target_include_directories(yueshi_lua_pack_corpus PRIVATE
-    ${doctest_include_dir}
-    ${CMAKE_SOURCE_DIR}/include)
-target_compile_definitions(yueshi_lua_pack_corpus PRIVATE
-    YUESHI_CORPUS_DIR="${CMAKE_SOURCE_DIR}/test/corpus/lua-5.4.8-tests")
-yueshi_test_enable_sanitizers(yueshi_lua_pack_corpus)
-add_test(NAME yueshi_lua_pack_corpus COMMAND yueshi_lua_pack_corpus)
+yueshi_eval_test(yueshi_lua_pack_corpus pack_corpus.cpp
+    WITHOUT_STATE
+    CORPUS_DIR "${CMAKE_SOURCE_DIR}/test/corpus/lua-5.4.8-tests")
 
 # goto corpus acceptance: runs the M3.5-runnable portions of goto.lua
 # (compile-time checks R1-R4 + runtime goto behavior). The full goto.lua
 # requires M4 (debug.upvalueid + <close> attribute).
-add_executable(yueshi_lua_goto_corpus
-    goto_corpus.cpp
-    ../src/lua/state.cpp
-    ../src/lua/evaluator.cpp
-    ../src/lua/compile.cpp
-    ../src/lua/goto_check.cpp
-    ../src/lua/strlib.cpp
-    ../src/lua/tablib.cpp
-    ../src/lua/mathlib.cpp
-    ../src/lua/packagelib.cpp
-    ../src/lua/pattern.cpp
-    ../src/lua/numops.cpp
-    ../src/lua/heap.cpp
-    ../src/lua/parser.cpp
-    ../src/lua/lex.cpp)
-target_link_libraries(yueshi_lua_goto_corpus PRIVATE peglib yueshi_test_main)
-target_include_directories(yueshi_lua_goto_corpus PRIVATE
-    ${doctest_include_dir}
-    ${CMAKE_SOURCE_DIR}/include)
-target_compile_definitions(yueshi_lua_goto_corpus PRIVATE
-    YUESHI_CORPUS_DIR="${CMAKE_SOURCE_DIR}/test/corpus")
-yueshi_test_enable_sanitizers(yueshi_lua_goto_corpus)
-add_test(NAME yueshi_lua_goto_corpus COMMAND yueshi_lua_goto_corpus)
+yueshi_eval_test(yueshi_lua_goto_corpus goto_corpus.cpp
+    CORPUS_DIR "${CMAKE_SOURCE_DIR}/test/corpus")
 
 # Pattern engine unit tests: pure-C++ tests over std::string_view.
 add_executable(yueshi_lua_pattern_test

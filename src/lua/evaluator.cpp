@@ -10,7 +10,9 @@
 #include "lua/ast.h"
 #include "lua/compile.h"
 #include "lua/goto_check.h"
+#include "lua/iolib.h"
 #include "lua/numops.h"
+#include "lua/oslib.h"
 #include "lua/strlib.h"
 #include "lua/tablib.h"
 #include "lua/mathlib.h"
@@ -356,12 +358,18 @@ namespace ys
             return {t};
         }
 
-        // getmetatable(t): returns t's metatable, or nil if it has none.
-        ValueVec b_getmetatable(Evaluator&, ValueVec args)
+        // getmetatable(v): returns v's metatable, or nil if it has none.
+        // Works on tables AND userdata (both carry per-object/per-value
+        // metatables). Strings/closures have per-type metatables — getmetatable
+        // on those returns the type's metatable if any (Lua allows this).
+        ValueVec b_getmetatable(Evaluator& ev, ValueVec args)
         {
             LuaValue t = args.size() >= 1 ? args[0] : LuaValue::nil();
-            if (!t.is_table()) return {LuaValue::nil()};
-            Table* mt = t.as_table()->metatable;
+            Table* mt = nullptr;
+            if (t.is_table())         mt = t.as_table()->metatable;
+            else if (t.is_userdata()) mt = t.as_userdata()->metatable;
+            else if (t.is_closure())  mt = t.as_closure()->metatable;
+            else if (t.is_str())      mt = ev.string_metatable();
             return {mt ? LuaValue::table(mt) : LuaValue::nil()};
         }
 
@@ -502,6 +510,10 @@ namespace ys
             // M3.2-3: table + math libraries.
             install_table_lib(*this);
             install_math_lib(*this);
+            // M3.4-B/C: io + os libraries (before package so package.loaded
+            // can pre-seed their identities).
+            install_io_lib(*this);
+            install_os_lib(*this);
             // M3.5-D: package library + require (must be after the other
             // libs so package.loaded can pre-seed their identities).
             install_package_lib(*this);
@@ -1258,9 +1270,10 @@ namespace ys
         // -------------------------------------------------------------------
         Table* Evaluator::metatable_of(const LuaValue& v) noexcept
         {
-            if (v.is_table())   return v.as_table()->metatable;
-            if (v.is_closure()) return v.as_closure()->metatable;
-            if (v.is_str())     return m_string_mt;   // per-type (M3.1)
+            if (v.is_table())    return v.as_table()->metatable;
+            if (v.is_closure())  return v.as_closure()->metatable;
+            if (v.is_str())      return m_string_mt;   // per-type (M3.1)
+            if (v.is_userdata()) return v.as_userdata()->metatable;
             return nullptr;
         }
 

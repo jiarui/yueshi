@@ -16,6 +16,7 @@
 // collect, giving amortized O(1) per allocation; state.collect() forces a pass.
 
 #include <cstddef>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -51,6 +52,10 @@ namespace ys
                                       Table* env_table, bool is_vararg);
             Builtin*     make_builtin(std::string name, BuiltinFn fn);
             Environment* make_env(Environment* parent);
+            // Full userdata: opaque payload + per-object metatable (set by the
+            // caller after allocation). The Heap takes ownership of the GCObject
+            // shell; the payload's lifetime is governed by its shared_ptr.
+            Userdata*    make_userdata(std::shared_ptr<void> payload);
 
             // Maximum length (in bytes) for a short (interned) string. Matches
             // reference Lua's LUAI_MAXSHORTLEN.
