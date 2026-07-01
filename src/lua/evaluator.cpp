@@ -100,10 +100,19 @@ namespace ys
 
         ValueVec b_error(Evaluator&, ValueVec args)
         {
-            // error(v) throws. M2.0: no error objects / level; just the message.
+            // error(msg [, level]). msg may be any value; level controls
+            // position prepending (Lua §2.3): level==0 -> none, level>=1 ->
+            // prepend "chunk:line:" (position tracking is M4/debug-lib
+            // territory; the corpus's checkerror matches substrings, so the
+            // bare message suffices for M2.3).
             LuaValue v = args.empty() ? LuaValue::nil() : args[0];
-            throw LuaError(v.is_str() ? v.as_str()->data
-                                      : value_to_string(v), 0);
+            // level is unused for now — retained for API compatibility.
+            // long long level = args.size() >= 2 && args[1].is_int() ? args[1].as_int() : 1;
+            std::string msg = v.is_str() ? v.as_str()->data
+                                         : value_to_string(v);
+            LuaError err(msg, 0);
+            err.obj(v);   // pcall returns the original value, not the rendering
+            throw err;
         }
 
         ValueVec b_assert(Evaluator&, ValueVec args)
@@ -111,7 +120,68 @@ namespace ys
             if (!args.empty() && args[0].truthy()) return args;   // pass through
             std::string msg = args.size() >= 2 ? value_to_string(args[1])
                                                : "assertion failed!";
-            throw LuaError(msg, 0);
+            LuaError err(msg, 0);
+            // If a message value was given, pcall should return it.
+            if (args.size() >= 2) err.obj(args[1]);
+            throw err;
+        }
+
+        // pcall(f, ...): call f with ...; on success return true, ...results;
+        // on error return false, error-value. The error value is the original
+        // error() argument (any LuaValue) if error() attached one, else the
+        // error message string rendered from what().
+        ValueVec b_pcall(Evaluator& ev, ValueVec args)
+        {
+            if (args.empty())
+                throw LuaError("bad argument #1 to 'pcall' (value expected)", 0);
+            LuaValue f = args[0];
+            ValueVec call_args(args.begin() + 1, args.end());
+            try {
+                ValueVec results = ev.call_value(f, std::move(call_args), 0);
+                ValueVec ret;
+                ret.push_back(LuaValue::boolean(true));
+                for (auto&& r : results) ret.push_back(std::move(r));
+                return ret;
+            }
+            catch (const LuaError& e) {
+                ValueVec ret;
+                ret.push_back(LuaValue::boolean(false));
+                ret.push_back(!e.obj().is_nil()
+                    ? e.obj()
+                    : LuaValue::str(ev.heap().make_string(e.what())));
+                return ret;
+            }
+        }
+
+        // xpcall(f, handler, ...): like pcall, but on error invokes
+        // handler(err) first. Returns false, handler-result. If the handler
+        // itself errors, that error propagates (natural: the second
+        // call_value throws, escaping xpcall).
+        ValueVec b_xpcall(Evaluator& ev, ValueVec args)
+        {
+            if (args.size() < 2)
+                throw LuaError("bad argument to 'xpcall' (expected 2 values)", 0);
+            LuaValue f = args[0];
+            LuaValue handler = args[1];
+            ValueVec call_args(args.begin() + 2, args.end());
+            try {
+                ValueVec results = ev.call_value(f, std::move(call_args), 0);
+                ValueVec ret;
+                ret.push_back(LuaValue::boolean(true));
+                for (auto&& r : results) ret.push_back(std::move(r));
+                return ret;
+            }
+            catch (const LuaError& e) {
+                LuaValue err_val = !e.obj().is_nil()
+                    ? e.obj()
+                    : LuaValue::str(ev.heap().make_string(e.what()));
+                ValueVec h_results = ev.call_value(
+                    handler, {err_val}, 0);
+                ValueVec ret;
+                ret.push_back(LuaValue::boolean(false));
+                for (auto&& r : h_results) ret.push_back(std::move(r));
+                return ret;
+            }
         }
 
         // ipairs(t) -> iterator, t, 0. The iterator is a builtin that, given
@@ -288,6 +358,8 @@ namespace ys
             add("tonumber", builtins::b_tonumber);
             add("error",    builtins::b_error);
             add("assert",   builtins::b_assert);
+            add("pcall",    builtins::b_pcall);
+            add("xpcall",   builtins::b_xpcall);
             add("ipairs",   builtins::b_ipairs);
             add("pairs",    builtins::b_pairs);
             add("next",     builtins::b_next);

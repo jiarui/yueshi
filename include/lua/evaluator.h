@@ -29,14 +29,23 @@ namespace ys
     {
         // A runtime error: type errors, bad index, arity, non-function call,
         // depth limit, etc. Carries a source byte offset so the top level can
-        // render `chunk:line:col: <msg>` via a peg::SourceMap.
+        // render `chunk:line:col: <msg>` via a peg::SourceMap. M2.3: also
+        // carries an optional error OBJECT (any LuaValue) — when error() is
+        // called with a non-string value, pcall/xpcall must return that exact
+        // object, not its string rendering. For all error sites other than
+        // error(), the object is nil and pcall returns what() as a string.
         class LuaError : public std::runtime_error {
         public:
             LuaError(std::string what, std::size_t src_off)
                 : std::runtime_error(std::move(what)), m_off(src_off) {}
             std::size_t offset() const noexcept { return m_off; }
+            // The error object: non-nil only for error() with a non-string
+            // value. pcall/xpcall return this; falls back to what() as a string.
+            const LuaValue& obj() const noexcept { return m_obj; }
+            void obj(LuaValue v) noexcept { m_obj = v; }
         private:
             std::size_t m_off;
+            LuaValue    m_obj{LuaValue::nil()};
         };
 
         // Non-local control flow carried out of statement evaluation. Normal
@@ -80,6 +89,11 @@ namespace ys
             // value has one (used by the tostring/print builtins). Allocates the
             // result String on the heap. `off` is attached to any error raised.
             LuaValue stringify(const LuaValue& v, std::size_t off);
+
+            // Call a callable value (closure/builtin, or anything with __call)
+            // with args. Public so builtins like pcall/xpcall/table.sort can
+            // drive function calls.
+            ValueVec call_value(const LuaValue& f, ValueVec args, std::size_t off);
 
         private:
             Heap&          m_heap;
@@ -125,10 +139,6 @@ namespace ys
             // for Index/Field; Name goes through assign().
             void assign_target(const AstNode& target, Environment* env,
                                LuaValue v, std::size_t off);
-
-            // Call a callable value (closure or builtin) with args. Implemented
-            // in Step 5; declared here so generic-for can drive the iterator.
-            ValueVec call_value(const LuaValue& f, ValueVec args, std::size_t off);
 
             // Evaluate a Call node: func + args -> result values.
             ValueVec eval_call(const Call& c, Environment* env);

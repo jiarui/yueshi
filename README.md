@@ -19,14 +19,16 @@ mark-sweep collector (no `shared_ptr` — ownership is singular, in the Heap),
 Lua 5.4 integer/float subtype arithmetic, closures, tables, multires, the
 full **metatable/metamethod** system (all arithmetic/bitwise/concat/ordering/
 equality events, `__index`/`__newindex` chains, `__call`, `__len`,
-`__tostring`, `setmetatable`/`getmetatable`), and **goto/labels**
+`__tostring`, `setmetatable`/`getmetatable`), **goto/labels**
 (`goto name` / `::name::`, backward and forward, in/out of any block or
-loop, with a per-block memoized label cache), plus a minimal standard library
-(`print`/`type`/`tostring`/`tonumber`/`error`/`assert`/`ipairs`/`pairs`/
-`next`/`select`/`rawget`/`rawset`/`rawequal`/`rawlen`). It passes **107/107**
-evaluator unit tests (6 386 assertions) and a **12/12** GC unit suite (42
-assertions) that verifies unreachable cycles (and tables with metatables) are
-collected while escaping closures keep their captured environment alive. All
+loop, with a per-block memoized label cache), and **error handling**
+(`pcall`/`xpcall`/`error` with arbitrary-value error objects), plus a minimal
+standard library (`print`/`type`/`tostring`/`tonumber`/`error`/`assert`/
+`pcall`/`xpcall`/`ipairs`/`pairs`/`next`/`select`/`rawget`/`rawset`/
+`rawequal`/`rawlen`). It passes **122/122** evaluator unit tests (6 810
+assertions) and a **12/12** GC unit suite (42 assertions) that verifies
+unreachable cycles (and tables with metatables) are collected while escaping
+closures keep their captured environment alive. All
 gates are green under ASan + UBSan with leak detection. The full standard
 library (`string`/`table`/`math`/`io`/`os`, real `_G`/`_ENV`) is the next
 milestone.

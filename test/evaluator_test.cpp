@@ -1268,6 +1268,200 @@ TEST_CASE("evaluator: goto across repeated loop iterations works")
         "return s")) == 6);       // 1 + 2 + 3
 }
 
+// =====================================================================
+// M2.3: pcall / xpcall / error objects
+// =====================================================================
+
+TEST_CASE("evaluator: pcall success returns true + results")
+{
+    EvalRig g;
+    // No args -> true, no extra values.
+    {
+        auto v = g.run("return pcall(function() end)");
+        REQUIRE(v.size() == 1);
+        CHECK(as_bool(v[0]) == true);
+    }
+    // Single return.
+    {
+        auto v = g.run("return pcall(function() return 42 end)");
+        REQUIRE(v.size() == 2);
+        CHECK(as_bool(v[0]) == true);
+        CHECK(as_int(v[1]) == 42);
+    }
+    // Multi return.
+    {
+        auto v = g.run("return pcall(function() return 1, 2, 3 end)");
+        REQUIRE(v.size() == 4);
+        CHECK(as_bool(v[0]) == true);
+        CHECK(as_int(v[3]) == 3);
+    }
+    // Args forwarded.
+    {
+        auto v = g.run("return pcall(function(a, b) return a + b end, 10, 20)");
+        REQUIRE(v.size() == 2);
+        CHECK(as_bool(v[0]) == true);
+        CHECK(as_int(v[1]) == 30);
+    }
+}
+
+TEST_CASE("evaluator: pcall catches error(string)")
+{
+    EvalRig g;
+    auto v = g.run("return pcall(function() error('boom') end)");
+    REQUIRE(v.size() == 2);
+    CHECK(as_bool(v[0]) == false);
+    CHECK(as_str(v[1]) == "boom");
+}
+
+TEST_CASE("evaluator: pcall catches error(table) — returns the object")
+{
+    EvalRig g;
+    auto v = g.run("return pcall(function() error({code = 42}) end)");
+    REQUIRE(v.size() == 2);
+    CHECK(as_bool(v[0]) == false);
+    REQUIRE(v[1].is_table());
+    // Verify it's the same table (identity, not a copy).
+    LuaKey k; k.k = LuaKey::K::Str; k.s = "code";
+    auto it = v[1].as_table()->hash.find(k);
+    REQUIRE(it != v[1].as_table()->hash.end());
+    CHECK(as_int(it->second) == 42);
+}
+
+TEST_CASE("evaluator: pcall catches error(number)")
+{
+    EvalRig g;
+    auto v = g.run("return pcall(function() error(99) end)");
+    REQUIRE(v.size() == 2);
+    CHECK(as_bool(v[0]) == false);
+    CHECK(as_int(v[1]) == 99);
+}
+
+TEST_CASE("evaluator: pcall catches runtime type errors")
+{
+    EvalRig g;
+    // Arithmetic on non-number -> runtime error, message is a string.
+    auto v = g.run("return pcall(function() return nil + 1 end)");
+    REQUIRE(v.size() == 2);
+    CHECK(as_bool(v[0]) == false);
+    CHECK(v[1].is_str());
+}
+
+TEST_CASE("evaluator: pcall catches nested errors")
+{
+    EvalRig g;
+    auto v = g.run(
+        "return pcall(function() "
+        "  local function inner() error('deep') end; "
+        "  inner() "
+        "end)");
+    REQUIRE(v.size() == 2);
+    CHECK(as_bool(v[0]) == false);
+    CHECK(as_str(v[1]) == "deep");
+}
+
+TEST_CASE("evaluator: pcall error propagates through pcall boundary")
+{
+    EvalRig g;
+    // An uncaught error still aborts the chunk if pcall isn't used.
+    bool threw = false;
+    try { (void)g.run_scalar("error('uncaught')"); }
+    catch (const LuaError&) { threw = true; }
+    CHECK(threw);
+}
+
+TEST_CASE("evaluator: error(msg, 0) — level 0, no position prepending")
+{
+    EvalRig g;
+    auto v = g.run("return pcall(function() error('plain', 0) end)");
+    REQUIRE(v.size() == 2);
+    CHECK(as_bool(v[0]) == false);
+    CHECK(as_str(v[1]) == "plain");
+}
+
+TEST_CASE("evaluator: xpcall success")
+{
+    EvalRig g;
+    auto v = g.run(
+        "return xpcall(function() return 'ok' end, "
+        "  function(e) return 'handler:' .. e end)");
+    REQUIRE(v.size() == 2);
+    CHECK(as_bool(v[0]) == true);
+    CHECK(as_str(v[1]) == "ok");
+}
+
+TEST_CASE("evaluator: xpcall invokes handler on error")
+{
+    EvalRig g;
+    auto v = g.run(
+        "return xpcall(function() error('bang') end, "
+        "  function(e) return 'handler:' .. e end)");
+    REQUIRE(v.size() == 2);
+    CHECK(as_bool(v[0]) == false);
+    CHECK(as_str(v[1]) == "handler:bang");
+}
+
+TEST_CASE("evaluator: xpcall handler receives non-string error object")
+{
+    EvalRig g;
+    auto v = g.run(
+        "return xpcall(function() error({val = 7}) end, "
+        "  function(e) return e.val end)");
+    REQUIRE(v.size() == 2);
+    CHECK(as_bool(v[0]) == false);
+    CHECK(as_int(v[1]) == 7);
+}
+
+TEST_CASE("evaluator: xpcall with extra args forwards to f")
+{
+    EvalRig g;
+    auto v = g.run(
+        "return xpcall(function(a, b) return a * b end, "
+        "  function(e) return e end, 3, 4)");
+    REQUIRE(v.size() == 2);
+    CHECK(as_bool(v[0]) == true);
+    CHECK(as_int(v[1]) == 12);
+}
+
+TEST_CASE("evaluator: xpcall handler error propagates")
+{
+    EvalRig g;
+    // If the handler itself errors, xpcall does NOT catch it.
+    bool threw = false;
+    try {
+        (void)g.run_scalar(
+            "xpcall(function() error('first') end, "
+            "  function(e) error('second') end)");
+    }
+    catch (const LuaError& e) {
+        threw = true;
+        CHECK(std::string(e.what()) == "second");
+    }
+    CHECK(threw);
+}
+
+TEST_CASE("evaluator: assert with pcall returns message")
+{
+    EvalRig g;
+    auto v = g.run("return pcall(function() assert(nil, 'nope') end)");
+    REQUIRE(v.size() == 2);
+    CHECK(as_bool(v[0]) == false);
+    CHECK(as_str(v[1]) == "nope");
+}
+
+TEST_CASE("evaluator: pcall can be nested")
+{
+    EvalRig g;
+    auto v = g.run(
+        "local ok, err = pcall(function() "
+        "  pcall(function() error('inner') end); "
+        "  error('outer') "
+        "end); "
+        "return ok, err");
+    REQUIRE(v.size() == 2);
+    CHECK(as_bool(v[0]) == false);
+    CHECK(as_str(v[1]) == "outer");
+}
+
 
 
 
