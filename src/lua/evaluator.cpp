@@ -1,7 +1,9 @@
 #include "lua/evaluator.h"
 
 #include <cstdlib>
+#include <cerrno>
 #include <fstream>
+#include <iostream>
 #include <iterator>
 #include <ostream>
 #include <utility>
@@ -102,21 +104,56 @@ namespace ys
 
         ValueVec b_tonumber(Evaluator& ev, ValueVec args)
         {
-            // tonumber(v [, base]). Base form (base==10): accept a number or a
-            // numeric string; else return nil. (Base conversion is M3.)
             if (args.empty()) return {LuaValue::nil()};
             const LuaValue& v = args[0];
             if (v.is_number()) return {v};
             if (v.is_str()) {
-                const std::string& s = v.as_str()->data;
-                // Try integer, then float.
-                char* end = nullptr;
-                long long li = std::strtoll(s.c_str(), &end, 10);
-                if (end != s.c_str() && *end == '\0')
+                const std::string& raw = v.as_str()->data;
+                // Skip leading whitespace.
+                std::size_t start = raw.find_first_not_of(" \t\n\r\v\f");
+                if (start == std::string::npos) return {LuaValue::nil()};
+                std::string s = raw.substr(start);
+                // Trim trailing whitespace.
+                std::size_t end = s.find_last_not_of(" \t\n\r\v\f");
+                if (end != std::string::npos) s = s.substr(0, end + 1);
+                if (s.empty()) return {LuaValue::nil()};
+
+                // Detect hex prefix (0x or 0X, possibly after a sign).
+                std::size_t hex_start = 0;
+                if (s[0] == '+' || s[0] == '-') ++hex_start;
+                bool is_hex = (hex_start + 1 < s.size() &&
+                               s[hex_start] == '0' &&
+                               (s[hex_start + 1] == 'x' || s[hex_start + 1] == 'X'));
+
+                if (is_hex) {
+                    // Try hex integer first (strtoll with base 16). Hex integers
+                    // wrap on overflow (matching Lua's behavior for large hex).
+                    // Use strtoull on the full string (NUL-safe: check that the
+                    // ENTIRE string was consumed, not just up to a NUL byte).
+                    const char* cs = s.c_str();
+                    char* e2 = nullptr;
+                    errno = 0;
+                    unsigned long long hu = std::strtoull(cs, &e2, 16);
+                    if (e2 != cs && static_cast<std::size_t>(e2 - cs) == s.size())
+                        return {LuaValue::integer(
+                            static_cast<long long>(hu))};
+                    // Not a pure hex integer: try hex float (0x1p4, 0xA.8, etc).
+                    e2 = nullptr;
+                    double d = std::strtod(cs, &e2);
+                    if (e2 != cs && static_cast<std::size_t>(e2 - cs) == s.size())
+                        return {LuaValue::flt(d)};
+                    return {LuaValue::nil()};
+                }
+
+                // Decimal: try integer, then float.
+                const char* cs = s.c_str();
+                char* endp = nullptr;
+                long long li = std::strtoll(cs, &endp, 10);
+                if (endp != cs && static_cast<std::size_t>(endp - cs) == s.size())
                     return {LuaValue::integer(li)};
-                end = nullptr;
-                double d = std::strtod(s.c_str(), &end);
-                if (end != s.c_str() && *end == '\0')
+                endp = nullptr;
+                double d = std::strtod(cs, &endp);
+                if (endp != cs && static_cast<std::size_t>(endp - cs) == s.size())
                     return {LuaValue::flt(d)};
             }
             (void)ev;
@@ -284,6 +321,19 @@ namespace ys
         ValueVec b_pairs(Evaluator& ev, ValueVec args)
         {
             LuaValue t = args.empty() ? LuaValue::nil() : args[0];
+            // Consult __pairs metamethod first (Lua 5.4 allows custom
+            // iteration via __pairs on a metatable).
+            Table* mt = nullptr;
+            if (t.is_table())         mt = t.as_table()->metatable;
+            else if (t.is_userdata()) mt = t.as_userdata()->metatable;
+            else if (t.is_closure())  mt = t.as_closure()->metatable;
+            else if (t.is_str())      mt = ev.string_metatable();
+            if (mt) {
+                LuaKey k; k.k = LuaKey::K::Str; k.s = "__pairs";
+                auto it = mt->hash.find(k);
+                if (it != mt->hash.end() && it->second.is_callable())
+                    return ev.call_value(it->second, {t}, 0);
+            }
             Builtin* n = ev.heap().make_builtin("next", b_next);
             return {LuaValue::builtin(n), t, LuaValue::nil()};
         }
@@ -394,6 +444,29 @@ namespace ys
                     static_cast<long long>(ev.heap().live_count()) / 1024 + 1),
                         LuaValue::integer(0)};
             return {LuaValue::integer(0)};
+        }
+
+        // warn(msg, ...)
+        // Lua 5.4 warn: messages prefixed with "@on"/"@off"/"@verbose" are
+        // control messages (toggled silently). All other messages print to
+        // stderr with a "Lua warning: " prefix. Multi-arg messages are
+        // concatenated without separators.
+        ValueVec b_warn(Evaluator&, ValueVec args)
+        {
+            if (args.empty()) return {};
+            // Control messages start with "@".
+            if (args[0].is_str()) {
+                const std::string& s = args[0].as_str()->data;
+                if (s == "@on" || s == "@off" || s == "@verbose")
+                    return {};   // control: no-op (we always warn)
+            }
+            std::string msg;
+            for (const LuaValue& v : args) {
+                if (v.is_str()) msg += v.as_str()->data;
+                else            msg += value_to_string(v);
+            }
+            std::cerr << "Lua warning: " << msg << std::endl;
+            return {};
         }
 
         // load(chunk [, chunkname [, mode [, env]]])
@@ -513,6 +586,7 @@ namespace ys
             add("setmetatable", builtins::b_setmetatable);
             add("getmetatable", builtins::b_getmetatable);
             add("collectgarbage", builtins::b_collectgarbage);
+            add("warn",            builtins::b_warn);
 
             // Install the string library + per-type string metatable (M3.1).
             install_string_lib(*this);
@@ -963,16 +1037,37 @@ namespace ys
                                                lhs.is_number() ? rhs : lhs)) +
                                            " value", off);
                         }
-                        // --- bitwise: raw when both ints, else metamethod ---
+                        // --- bitwise: raw when both ints (or integral floats),
+                        // else metamethod ---
                         case K::BAnd: case K::BOr: case K::BXor:
                         case K::Shl: case K::Shr: {
-                            if (both_ints(lhs, rhs)) {
+                            // Lua 5.4: bitwise ops accept integers and
+                            // integral floats (coerced). Strings are NOT
+                            // auto-coerced (bwcoercion.lua handles that via
+                            // the string metatable).
+                            auto to_int = [](const LuaValue& v,
+                                             long long* out) -> bool {
+                                if (v.is_int()) { *out = v.as_int(); return true; }
+                                if (v.is_flt()) {
+                                    double f = v.as_flt();
+                                    long long i = static_cast<long long>(f);
+                                    if (static_cast<double>(i) == f) {
+                                        *out = i;
+                                        return true;
+                                    }
+                                }
+                                return false;
+                            };
+                            long long li, ri;
+                            if (to_int(lhs, &li) && to_int(rhs, &ri)) {
+                                LuaValue L = LuaValue::integer(li);
+                                LuaValue R = LuaValue::integer(ri);
                                 switch (x.op) {
-                                case K::BAnd: return arith_band(lhs, rhs, off);
-                                case K::BOr:  return arith_bor (lhs, rhs, off);
-                                case K::BXor: return arith_bxor(lhs, rhs, off);
-                                case K::Shl:  return arith_shl (lhs, rhs, off);
-                                case K::Shr:  return arith_shr (lhs, rhs, off);
+                                case K::BAnd: return arith_band(L, R, off);
+                                case K::BOr:  return arith_bor (L, R, off);
+                                case K::BXor: return arith_bxor(L, R, off);
+                                case K::Shl:  return arith_shl (L, R, off);
+                                case K::Shr:  return arith_shr (L, R, off);
                                 default: break;
                                 }
                             }
@@ -987,7 +1082,7 @@ namespace ys
                             throw LuaError("attempt to perform bitwise operation "
                                            "on a " +
                                            std::string(type_name(
-                                               lhs.is_int() ? rhs : lhs)) +
+                                               lhs.is_number() ? rhs : lhs)) +
                                            " value", off);
                         }
                         // --- concatenation ---

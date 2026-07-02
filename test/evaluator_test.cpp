@@ -219,13 +219,12 @@ TEST_CASE("evaluator: bitwise operators — integer-only")
     CHECK(as_int(g.run_scalar("return ~0")) == -1);
 }
 
-TEST_CASE("evaluator: bitwise rejects floats even if integral")
+TEST_CASE("evaluator: bitwise accepts integral floats (Lua 5.4)")
 {
     EvalRig g;
-    // 3.0 is a float; bitwise on it must error (no implicit coercion).
-    bool threw = false;
-    try { (void)g.run_scalar("return 3.0 & 1"); } catch (const LuaError&) { threw = true; }
-    CHECK(threw);
+    // 3.0 is an integral float; Lua 5.4 coerces it to integer for bitwise.
+    CHECK(as_int(g.run_scalar("return 3.0 & 1")) == 1);
+    CHECK(as_int(g.run_scalar("return 0xFF.0 | 0x10")) == 0xFF);
 }
 
 TEST_CASE("evaluator: equality — int/float cross-subtype by value")
