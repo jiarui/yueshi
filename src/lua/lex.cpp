@@ -16,8 +16,10 @@ using namespace ys::lua;
 // escapes, so by the time we get here the structure is well-formed.
 // ---------------------------------------------------------------------------
 namespace {
-// Encode a single Unicode codepoint as UTF-8. Used for \u{XXXX}.
-std::string encode_utf8(unsigned cp)
+// Encode a single Unicode codepoint as UTF-8 (original UTF-8 range, up to
+// 0x7FFFFFFF). Used for \u{XXXX}. Lua 5.4 supports the full original range
+// in the lexer escape.
+std::string encode_utf8(unsigned long long cp)
 {
     std::string out;
     if (cp <= 0x7F) {
@@ -29,8 +31,21 @@ std::string encode_utf8(unsigned cp)
         out += static_cast<char>(0xE0 | (cp >> 12));
         out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
         out += static_cast<char>(0x80 | (cp & 0x3F));
-    } else {
+    } else if (cp <= 0x1FFFFF) {
         out += static_cast<char>(0xF0 | (cp >> 18));
+        out += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
+        out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+        out += static_cast<char>(0x80 | (cp & 0x3F));
+    } else if (cp <= 0x3FFFFFF) {
+        out += static_cast<char>(0xF8 | (cp >> 24));
+        out += static_cast<char>(0x80 | ((cp >> 18) & 0x3F));
+        out += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
+        out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+        out += static_cast<char>(0x80 | (cp & 0x3F));
+    } else {
+        out += static_cast<char>(0xFC | (cp >> 30));
+        out += static_cast<char>(0x80 | ((cp >> 24) & 0x3F));
+        out += static_cast<char>(0x80 | ((cp >> 18) & 0x3F));
         out += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
         out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
         out += static_cast<char>(0x80 | (cp & 0x3F));
@@ -90,14 +105,14 @@ std::string decode_escapes(std::string_view raw)
             // \u{XXXX} — hex digits until the closing brace (grammar-enforced).
             // raw[i] is 'u'; expect '{' next.
             ++i; // consume '{'
-            unsigned cp = 0;
+            unsigned long long cp = 0;
             auto hexval = [](char ch) {
                 if (ch >= '0' && ch <= '9') return ch - '0';
                 if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
                 return ch - 'A' + 10;
             };
             while (raw[i + 1] != '}') {
-                cp = (cp << 4) | static_cast<unsigned>(hexval(raw[++i]));
+                cp = (cp << 4) | static_cast<unsigned long long>(hexval(raw[++i]));
             }
             ++i; // consume '}'
             out += encode_utf8(cp);

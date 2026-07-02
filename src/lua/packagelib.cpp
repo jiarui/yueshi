@@ -398,6 +398,7 @@ namespace ys
                 seed("table");
                 seed("io");
                 seed("os");
+                seed("utf8");
                 // _G
                 LuaKey ggk; ggk.k = LuaKey::K::Str; ggk.s = "_G";
                 auto git = ev.globals().hash.find(ggk);

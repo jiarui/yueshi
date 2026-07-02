@@ -16,6 +16,7 @@
 #include "lua/strlib.h"
 #include "lua/tablib.h"
 #include "lua/mathlib.h"
+#include "lua/utf8lib.h"
 #include "lua/packagelib.h"
 
 namespace ys
@@ -522,6 +523,8 @@ namespace ys
             // can pre-seed their identities).
             install_io_lib(*this);
             install_os_lib(*this);
+            // M3.6: utf8 library.
+            install_utf8_lib(*this);
             // M3.5-D: package library + require (must be after the other
             // libs so package.loaded can pre-seed their identities).
             install_package_lib(*this);

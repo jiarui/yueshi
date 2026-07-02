@@ -29,6 +29,7 @@ set(yueshi_eval_tus
     ../src/lua/mathlib.cpp
     ../src/lua/iolib.cpp
     ../src/lua/oslib.cpp
+    ../src/lua/utf8lib.cpp
     ../src/lua/packagelib.cpp
     ../src/lua/pattern.cpp
     ../src/lua/numops.cpp
@@ -151,6 +152,10 @@ yueshi_eval_test(yueshi_lua_sort_corpus sort_corpus.cpp
 
 # verybig corpus: verybig.lua tests large programs. _soft=true skips >64k.
 yueshi_eval_test(yueshi_lua_verybig_corpus verybig_corpus.cpp
+    CORPUS_DIR "${CMAKE_SOURCE_DIR}/test/corpus")
+
+# utf8 corpus: full utf8.lua (lax mode + all edge cases).
+yueshi_eval_test(yueshi_lua_utf8_corpus utf8_corpus.cpp
     CORPUS_DIR "${CMAKE_SOURCE_DIR}/test/corpus")
 
 # Pattern engine unit tests: pure-C++ tests over std::string_view.
