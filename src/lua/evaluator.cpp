@@ -59,6 +59,7 @@ namespace ys
             // A per-run env means `local _ENV = {}` in one run doesn't leak.
             Environment* chunk_env = m_heap.make_env(nullptr);
             chunk_env->env_table = m_G;
+            chunk_env->has_varargs = true;   // chunk is a vararg frame
             Control c = eval_block(chunk.body, chunk_env);
             if (c.flow == Flow::Return)
                 return std::move(c.vals);
@@ -135,6 +136,7 @@ namespace ys
                                          : value_to_string(v);
             LuaError err(msg, 0);
             err.obj(v);   // pcall returns the original value, not the rendering
+            err.from_error(true);   // mark: pcall returns nil when obj is nil
             throw err;
         }
 
@@ -169,9 +171,13 @@ namespace ys
             catch (const LuaError& e) {
                 ValueVec ret;
                 ret.push_back(LuaValue::boolean(false));
-                ret.push_back(!e.obj().is_nil()
-                    ? e.obj()
-                    : LuaValue::str(ev.heap().make_string(e.what())));
+                // error() with nil/no args: return nil (not a string rendering).
+                if (e.from_error() && e.obj().is_nil())
+                    ret.push_back(LuaValue::nil());
+                else
+                    ret.push_back(!e.obj().is_nil()
+                        ? e.obj()
+                        : LuaValue::str(ev.heap().make_string(e.what())));
                 return ret;
             }
         }
@@ -195,9 +201,11 @@ namespace ys
                 return ret;
             }
             catch (const LuaError& e) {
-                LuaValue err_val = !e.obj().is_nil()
-                    ? e.obj()
-                    : LuaValue::str(ev.heap().make_string(e.what()));
+                LuaValue err_val = (e.from_error() && e.obj().is_nil())
+                    ? LuaValue::nil()
+                    : (!e.obj().is_nil()
+                        ? e.obj()
+                        : LuaValue::str(ev.heap().make_string(e.what())));
                 ValueVec h_results = ev.call_value(
                     handler, {err_val}, 0);
                 ValueVec ret;
@@ -866,7 +874,13 @@ namespace ys
                 return call_value(func, std::move(args), node.start());
             }
             if (holds<Vararg>(node)) {
-                return env->varargs;   // copy: '...' expands to all varargs
+                // '...' refers to the enclosing function's varargs. Block
+                // scopes (if/while/for) create child environments that do NOT
+                // own varargs, so walk up the parent chain to the nearest
+                // has_varargs frame.
+                Environment* e = env;
+                while (e && !e->has_varargs) e = e->parent;
+                return e ? e->varargs : ValueVec{};
             }
             return ValueVec{eval_scalar(node, env)};
         }
@@ -1075,8 +1089,11 @@ namespace ys
                     }
                     else if constexpr (std::is_same_v<T, Vararg>) {
                         // As a scalar, '...' is its first value (or nil).
-                        return env->varargs.empty() ? LuaValue::nil()
-                                                    : env->varargs.front();
+                        // Walk up to the nearest vararg-owning frame.
+                        Environment* e = env;
+                        while (e && !e->has_varargs) e = e->parent;
+                        if (!e || e->varargs.empty()) return LuaValue::nil();
+                        return e->varargs.front();
                     }
                     else if constexpr (std::is_same_v<T, Index>) {
                         // prefixexp [ exp ]
@@ -1237,6 +1254,8 @@ namespace ys
             std::size_t nparams = 0;
             for (std::size_t i = 0; i < fb.params.size(); ++i) {
                 if (fb.params[i].kind == Param::Kind::Vararg) {
+                    // Mark this env as a vararg-owning frame (even if 0 extras).
+                    frame->has_varargs = true;
                     // Collect leftovers into the frame's varargs.
                     for (std::size_t j = i; j < args.size(); ++j)
                         frame->varargs.push_back(args[j]);

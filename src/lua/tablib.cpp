@@ -69,17 +69,41 @@ namespace ys
             else            t->hash[k] = std::move(v);
         }
 
+        // Get the effective length of a table, consulting __len if present
+        // (matches Lua's luaL_len semantics). Used by table.insert/remove/
+        // sort/concat which all respect the __len metamethod.
+        static long long table_len_meta(Evaluator& ev, Table* t)
+        {
+            if (t->metatable) {
+                LuaKey lk; lk.k = LuaKey::K::Str; lk.s = "__len";
+                auto it = t->metatable->hash.find(lk);
+                if (it != t->metatable->hash.end() && it->second.is_callable()) {
+                    ValueVec r = ev.call_value(it->second,
+                        {LuaValue::table(t)}, 0);
+                    if (r.empty() || !r[0].is_number())
+                        throw LuaError("object length is not an integer", 0);
+                    return r[0].is_int() ? r[0].as_int()
+                                         : static_cast<long long>(r[0].as_flt());
+                }
+            }
+            return table_border(t);
+        }
+
         // ===================================================================
         // table.insert(t, [pos,] value)
         // ===================================================================
 
-        ValueVec b_insert(Evaluator&, ValueVec args)
+        ValueVec b_insert(Evaluator& ev, ValueVec args)
         {
             Table* t = table_arg(args, 0, "insert");
-            long long n = table_border(t);
+            long long n = table_len_meta(ev, t);
+
+            // Lua 5.4 table.insert accepts exactly 2 or 3 args.
+            if (args.size() < 2 || args.size() > 3)
+                throw LuaError("wrong number of arguments to 'insert'", 0);
 
             long long pos;
-            if (args.size() >= 3) {
+            if (args.size() == 3) {
                 // 3-arg form: insert(t, pos, value). pos must be an integer.
                 if (!int_arg(args, 1, &pos))
                     throw LuaError("bad argument #2 to 'insert' "
@@ -89,11 +113,9 @@ namespace ys
                                    "bounds)", 0);
             } else {
                 // 2-arg form: append at the end.
-                if (args.size() < 2)
-                    throw LuaError("wrong number of arguments to 'insert'", 0);
                 pos = n + 1;
             }
-            const LuaValue& v = args[args.size() >= 3 ? 2 : 1];
+            const LuaValue& v = args[args.size() == 3 ? 2 : 1];
 
             // Shift up: t[n+1] = t[n]; t[n] = t[n-1]; ... t[pos] = t[pos-1].
             for (long long i = n; i >= pos; --i)
@@ -106,10 +128,10 @@ namespace ys
         // table.remove(t [, pos])
         // ===================================================================
 
-        ValueVec b_remove(Evaluator&, ValueVec args)
+        ValueVec b_remove(Evaluator& ev, ValueVec args)
         {
             Table* t = table_arg(args, 0, "remove");
-            long long n = table_border(t);
+            long long n = table_len_meta(ev, t);
 
             long long pos;
             if (args.size() >= 2) {
@@ -203,23 +225,45 @@ namespace ys
         ValueVec b_unpack(Evaluator&, ValueVec args)
         {
             Table* t = table_arg(args, 0, "unpack");
-            long long n = table_border(t);
-            long long i = 1, j = n;
-            if (args.size() >= 2) {
+            // i defaults to 1; nil means "use default". j defaults to the
+            // table border (#t); nil means "use default". When explicit i and
+            // j are given, use them verbatim (Lua allows unpacking arbitrary
+            // integer-keyed ranges, including negative/huge keys).
+            long long i = 1;
+            long long j = table_border(t);
+            if (args.size() >= 2 && !args[1].is_nil()) {
                 if (!int_arg(args, 1, &i))
                     throw LuaError("bad argument #2 to 'unpack' "
                                    "(number has no integer representation)", 0);
             }
-            if (args.size() >= 3) {
+            if (args.size() >= 3 && !args[2].is_nil()) {
                 if (!int_arg(args, 2, &j))
                     throw LuaError("bad argument #3 to 'unpack' "
                                    "(number has no integer representation)", 0);
             }
-            if (i < 1) i = 1;
-            if (j > n) j = n;
+            // Empty range: return nothing.
+            if (i > j) return {};
+            // Guard against absurd ranges that would OOM. Lua 5.4 raises
+            // "too many results to unpack" when the count exceeds a sane limit.
+            // Use overflow-safe comparison: since i <= j, we check whether
+            // the gap exceeds MAX_UNPACK. For i < 0, compute i + MAX_UNPACK
+            // (safe: |i| <= LLONG_MAX, MAX_UNPACK is tiny) and compare with j.
+            constexpr long long MAX_UNPACK = 8000;
+            if (i >= 0) {
+                if (j - i > MAX_UNPACK)
+                    throw LuaError("too many results to unpack", 0);
+            } else {
+                // i < 0: j - i may overflow signed long long. Use i + MAX_UNPACK
+                // (safe since MAX_UNPACK << |i|) as the threshold.
+                if (j > i + MAX_UNPACK)
+                    throw LuaError("too many results to unpack", 0);
+            }
             ValueVec out;
-            for (long long k = i; k <= j; ++k)
-                out.push_back(arr_get(t, k));
+            // Use unsigned iteration to avoid signed overflow when k == maxI.
+            for (unsigned long long k = static_cast<unsigned long long>(i);
+                 k <= static_cast<unsigned long long>(j);
+                 ++k)
+                out.push_back(arr_get(t, static_cast<long long>(k)));
             return out;
         }
 
@@ -227,7 +271,79 @@ namespace ys
         // table.move(a1, f, e, t [, a2]) — copy a1[f..e] to a2[t..]
         // ===================================================================
 
-        ValueVec b_move(Evaluator&, ValueVec args)
+        // Metamethod-aware table read: consults __index for absent keys.
+        static LuaValue meta_get(Evaluator& ev, const LuaValue& tv,
+                                 long long key)
+        {
+            Table* t = tv.as_table();
+            // Raw read first.
+            LuaKey k; k.k = LuaKey::K::Int; k.i = key;
+            auto it = t->hash.find(k);
+            if (it != t->hash.end()) return it->second;
+            // Absent: consult __index metamethod (if any).
+            if (t->metatable) {
+                LuaKey lk; lk.k = LuaKey::K::Str; lk.s = "__index";
+                auto mit = t->metatable->hash.find(lk);
+                if (mit != t->metatable->hash.end()) {
+                    const LuaValue& mm = mit->second;
+                    if (mm.is_table()) {
+                        LuaKey mk; mk.k = LuaKey::K::Int; mk.i = key;
+                        auto mit2 = mm.as_table()->hash.find(mk);
+                        if (mit2 != mm.as_table()->hash.end())
+                            return mit2->second;
+                        return LuaValue::nil();
+                    }
+                    if (mm.is_callable()) {
+                        ValueVec r = ev.call_value(mm, {tv, LuaValue::integer(key)}, 0);
+                        return r.empty() ? LuaValue::nil() : r[0];
+                    }
+                }
+            }
+            return LuaValue::nil();
+        }
+
+        // Metamethod-aware table write: consults __newindex.
+        static void meta_set(Evaluator& ev, const LuaValue& tv,
+                             long long key, const LuaValue& val,
+                             std::size_t off)
+        {
+            Table* t = tv.as_table();
+            // If the key is already present (raw), just update it.
+            LuaKey k; k.k = LuaKey::K::Int; k.i = key;
+            auto it = t->hash.find(k);
+            if (it != t->hash.end()) {
+                if (val.is_nil()) t->hash.erase(it);
+                else              it->second = val;
+                return;
+            }
+            // Absent: consult __newindex.
+            if (t->metatable) {
+                LuaKey lk; lk.k = LuaKey::K::Str; lk.s = "__newindex";
+                auto mit = t->metatable->hash.find(lk);
+                if (mit != t->metatable->hash.end()) {
+                    const LuaValue& mm = mit->second;
+                    if (mm.is_table()) {
+                        // If the key exists in the __newindex table, raw-set
+                        // there. Otherwise fall through to raw-set on t.
+                        LuaKey mk; mk.k = LuaKey::K::Int; mk.i = key;
+                        auto mit2 = mm.as_table()->hash.find(mk);
+                        if (mit2 != mm.as_table()->hash.end()) {
+                            if (val.is_nil()) mm.as_table()->hash.erase(mk);
+                            else              mit2->second = val;
+                            return;
+                        }
+                    } else if (mm.is_callable()) {
+                        ev.call_value(mm, {tv, LuaValue::integer(key), val}, off);
+                        return;
+                    }
+                }
+            }
+            // Raw set.
+            if (val.is_nil()) t->hash.erase(k);
+            else              t->hash[k] = val;
+        }
+
+        ValueVec b_move(Evaluator& ev, ValueVec args)
         {
             Table* a1 = table_arg(args, 0, "move");
             long long f, e, tt;
@@ -249,15 +365,49 @@ namespace ys
                 a2 = a1;   // default: move in place
             }
 
+            // Validate range: "too many elements to move" and "wrap around".
+            // Matches Lua 5.4's tmove: n = e - f + 1 (unsigned); if n exceeds
+            // MAXSIZE → "too many"; if tt + n - 1 exceeds MAXSIZE → "wrap".
             if (e >= f) {
-                if (tt <= f) {
-                    // Copy forward (source-after-dest): no overlap concern.
-                    for (long long k = 0; k <= e - f; ++k)
-                        arr_set(a2, tt + k, arr_get(a1, f + k));
+                using ULL = unsigned long long;
+                constexpr ULL MAXSIZE =
+                    static_cast<ULL>(std::numeric_limits<long long>::max());
+                // Distance check first (avoids n wraparound for full-domain
+                // ranges like [minI, maxI] where n would overflow to 0).
+                ULL dist = static_cast<ULL>(e) - static_cast<ULL>(f);
+                if (dist >= MAXSIZE)   // dist + 1 > MAXSIZE
+                    throw LuaError("too many elements to move", 0);
+                ULL n = dist + 1ULL;
+                // dest end = tt + n - 1. Check for wrap.
+                if (tt >= 0) {
+                    ULL de = static_cast<ULL>(tt) + n - 1ULL;
+                    if (de > MAXSIZE)
+                        throw LuaError("destination wrap around", 0);
                 } else {
-                    // Copy backward (source-before-dest): avoid stomping.
+                    // tt < 0: dest end might wrap past LLONG_MAX.
+                    ULL room = MAXSIZE - static_cast<ULL>(tt);
+                    if (n - 1ULL > room)
+                        throw LuaError("destination wrap around", 0);
+                }
+            }
+
+            if (e >= f) {
+                LuaValue tv1 = LuaValue::table(a1);
+                LuaValue tv2 = LuaValue::table(a2);
+                // Direction: backward only when dest starts within the source
+                // range (overlap requiring backward to avoid stomping unread
+                // values). Otherwise forward (non-overlapping or dest-before-
+                // source).
+                if (tt > f && tt <= e) {
+                    // Copy backward (dest overlaps source from the right).
                     for (long long k = e - f; k >= 0; --k)
-                        arr_set(a2, tt + k, arr_get(a1, f + k));
+                        meta_set(ev, tv2, tt + k,
+                                 meta_get(ev, tv1, f + k), 0);
+                } else {
+                    // Copy forward.
+                    for (long long k = 0; k <= e - f; ++k)
+                        meta_set(ev, tv2, tt + k,
+                                 meta_get(ev, tv1, f + k), 0);
                 }
             }
             return {LuaValue::table(a2)};
@@ -286,9 +436,10 @@ namespace ys
         static bool sort_less(SortCtx& sc, const LuaValue& a, const LuaValue& b)
         {
             if (sc.comp.is_nil()) {
-                // No comparator: use raw `<`. Lua 5.4 rejects mismatched types
-                // here (numbers vs strings), so propagate raw_cmp's LuaError.
-                return raw_cmp(a, b, sc.off) < 0;
+                // No comparator: use the `<` operator WITH metamethods (so
+                // tables with __lt sort correctly). Falls through to raw
+                // comparison for numbers/strings (the common case).
+                return sc.ev.lt_meta(a, b, sc.off);
             }
             ValueVec args{a, b};
             ValueVec r = sc.ev.call_value(sc.comp, std::move(args), sc.off);
@@ -379,7 +530,15 @@ namespace ys
             if (!comp.is_nil() && !comp.is_callable())
                 throw LuaError("bad argument #2 to 'sort' (function expected)", 0);
 
-            long long n = table_border(t);
+            long long n = table_len_meta(ev, t);
+
+            // "too big": array length must fit a sane range. Lua rejects
+            // lengths > INT_MAX. Negative lengths (e.g. from __len) are fine:
+            // the sort loop just does nothing (n < 1 => no comparisons).
+            if (n > static_cast<long long>(0x7FFFFFFF))
+                throw LuaError("too big", 0);
+            if (n < 1) return {};   // nothing to sort
+
             std::vector<LuaValue> a;
             a.reserve(static_cast<std::size_t>(n));
             for (long long i = 1; i <= n; ++i)

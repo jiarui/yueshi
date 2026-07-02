@@ -224,18 +224,20 @@ namespace ys
         }
 
         // Lua shifts are on the full 64-bit value; SHR is logical.
+        // Shifts ≥ 64 yield 0; shift of exactly 63 still wraps (1<<63 =
+        // LLONG_MIN). Negative shifts invert direction.
         static long long shl(long long a, long long n) noexcept
         {
-            if (n >= 63)      return 0;
-            if (n <= -63)     return 0;
+            if (n >= 64)      return 0;
+            if (n <= -64)     return 0;
             if (n >= 0)       return wrap_u(static_cast<unsigned long long>(a) << n);
             n = -n;
             return wrap_u(static_cast<unsigned long long>(a) >> n);
         }
         static long long shr(long long a, long long n) noexcept
         {
-            if (n >= 63)      return 0;
-            if (n <= -63)     return 0;
+            if (n >= 64)      return 0;
+            if (n <= -64)     return 0;
             if (n >= 0)       return wrap_u(static_cast<unsigned long long>(a) >> n);
             n = -n;
             return wrap_u(static_cast<unsigned long long>(a) << n);

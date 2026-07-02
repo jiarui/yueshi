@@ -257,6 +257,13 @@ namespace ys
             std::unordered_map<std::string, LuaValue> vars;
             std::unordered_set<std::string> consts;     // <const> enforcement
             std::vector<LuaValue> varargs;              // '...' for this frame
+            // True if this Environment is a function frame that OWNS varargs
+            // (even if empty — a vararg function called with 0 extra args has
+            // has_varargs=true but varargs.size()==0). Block scopes are NOT
+            // frames; '...' in a nested block resolves via the parent chain
+            // to the nearest frame. Without this flag we couldn't distinguish
+            // "0 varargs at this frame" from "not a frame, inherit upstream".
+            bool has_varargs{false};
             explicit Environment(Environment* p)
                 : GCObject{}, parent(p),
                   env_table(p ? p->env_table : nullptr) {}

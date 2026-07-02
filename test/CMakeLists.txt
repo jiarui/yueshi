@@ -140,6 +140,19 @@ yueshi_eval_test(yueshi_lua_pack_corpus pack_corpus.cpp
 yueshi_eval_test(yueshi_lua_goto_corpus goto_corpus.cpp
     CORPUS_DIR "${CMAKE_SOURCE_DIR}/test/corpus")
 
+# vararg corpus: vararg.lua exercises varargs/select/pack/unpack. No M4 deps.
+yueshi_eval_test(yueshi_lua_vararg_corpus vararg_corpus.cpp
+    CORPUS_DIR "${CMAKE_SOURCE_DIR}/test/corpus")
+
+# sort corpus: sort.lua exercises table.sort/insert/move/unpack/concat.
+# Sets _soft=true to use the 5000-element limit.
+yueshi_eval_test(yueshi_lua_sort_corpus sort_corpus.cpp
+    CORPUS_DIR "${CMAKE_SOURCE_DIR}/test/corpus")
+
+# verybig corpus: verybig.lua tests large programs. _soft=true skips >64k.
+yueshi_eval_test(yueshi_lua_verybig_corpus verybig_corpus.cpp
+    CORPUS_DIR "${CMAKE_SOURCE_DIR}/test/corpus")
+
 # Pattern engine unit tests: pure-C++ tests over std::string_view.
 add_executable(yueshi_lua_pattern_test
     pattern_test.cpp

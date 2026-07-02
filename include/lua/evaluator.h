@@ -43,9 +43,16 @@ namespace ys
             // value. pcall/xpcall return this; falls back to what() as a string.
             const LuaValue& obj() const noexcept { return m_obj; }
             void obj(LuaValue v) noexcept { m_obj = v; }
+            // True if this error was thrown by the error() builtin (vs. a
+            // runtime error like a type check). When error() is called with
+            // nil/no args, pcall must return nil (not a string); the flag
+            // distinguishes "error(nil)" from "runtime type error".
+            bool from_error() const noexcept { return m_from_error; }
+            void from_error(bool b) noexcept { m_from_error = b; }
         private:
             std::size_t m_off;
             LuaValue    m_obj{LuaValue::nil()};
+            bool        m_from_error{false};
         };
 
         // Non-local control flow carried out of statement evaluation. Normal
@@ -96,6 +103,10 @@ namespace ys
             // with args. Public so builtins like pcall/xpcall/table.sort can
             // drive function calls.
             ValueVec call_value(const LuaValue& f, ValueVec args, std::size_t off);
+
+            // Metamethod-aware ordering: a < b (honors __lt). Public so
+            // table.sort can use it for its default comparator.
+            bool lt_meta(const LuaValue& a, const LuaValue& b, std::size_t off);
 
             // Per-type string metatable accessor (M3.1). strlib installs
             // __index = string-lib-table so ("hi"):upper() works.
@@ -193,7 +204,6 @@ namespace ys
             // numbers/strings/nil/bool; __eq (table/closure pairs not raw-equal),
             // __lt, and __le (with the `not (b<a)` fallback via __lt).
             bool eq_meta(const LuaValue& a, const LuaValue& b, std::size_t off);
-            bool lt_meta(const LuaValue& a, const LuaValue& b, std::size_t off);
             bool le_meta(const LuaValue& a, const LuaValue& b, std::size_t off);
         };
 
