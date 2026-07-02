@@ -178,7 +178,7 @@ TEST_CASE("pattern: position capture ()")
 {
     auto r = find_res("hello", "()l");
     REQUIRE(r.captures.size() == 1);
-    CHECK(r.captures[0].len == 0);  // position capture
+    CHECK(is_position_cap(r.captures[0]));  // position capture
     CHECK(r.captures[0].start == 2);  // first 'l' at position 2
 }
 

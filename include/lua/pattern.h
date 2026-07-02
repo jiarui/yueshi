@@ -20,12 +20,23 @@ namespace ys
 {
     namespace lua
     {
-        // A single capture: a slice [start, start+len) of the subject, or a
-        // position capture (len==0, value = start as a 1-based index).
+        // A single capture: a slice [start, start+len) of the subject.
+        // Special len values:
+        //   CAP_UNFINISHED (-1): open capture (not yet closed by ')')
+        //   CAP_POSITION   (-2): position capture () — value is start as 1-based
+        // len == 0 means an EMPTY string capture (distinct from position).
         struct Capture {
             std::size_t start;  // 0-based byte offset into subject
-            std::size_t len;    // match length (0 = position capture)
+            std::size_t len;    // match length, or CAP_POSITION/UNFINISHED
         };
+
+        // Sentinel values for Capture::len.
+        inline constexpr std::size_t CAP_UNFINISHED = static_cast<std::size_t>(-1);
+        inline constexpr std::size_t CAP_POSITION   = static_cast<std::size_t>(-2);
+
+        // True if this capture is a position capture (() in the pattern).
+        inline bool is_position_cap(const Capture& c) noexcept
+        { return c.len == CAP_POSITION; }
 
         // Result of a successful match at a fixed position.
         struct MatchResult {

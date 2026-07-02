@@ -64,7 +64,11 @@ namespace ys
         // Is this char a class code? (Used to distinguish %a from \. etc.)
         bool is_class_code(char c)
         {
-            static const char codes[] = "aAcCdDgGlLpPsSuUwWxXzZ";
+            // NUL is NEVER a class code (it's a literal byte). Must NOT use a
+            // C-string range-for here because it would include the NUL terminator.
+            static const char codes[] = {'a','A','c','C','d','D','g','G','l','L',
+                                         'p','P','s','S','u','U','w','W','x','X',
+                                         'z','Z'};
             for (char x : codes) if (x == c) return true;
             return false;
         }
@@ -158,10 +162,6 @@ namespace ys
             std::vector<Capture> caps;
             int cap_level{0};  // total captures (open + closed)
 
-            static constexpr std::size_t CAP_UNFINISHED = static_cast<std::size_t>(-1);
-
-            // Push a new capture at position s with the given length marker.
-            // len=UNFINISHED for open captures; 0 for position captures.
             void push_cap(std::size_t s, std::size_t len)
             {
                 if (cap_level >= 32)
@@ -287,12 +287,12 @@ namespace ys
                 int saved = ms.cap_level;
                 if (p + 1 < pat.size() && pat[p + 1] == ')') {
                     // Position capture ()
-                    ms.push_cap(s, 0);  // len=0 = position capture
+                    ms.push_cap(s, CAP_POSITION);
                     auto r = match_rec(ms, s, p + 2);
                     if (!r) ms.cap_level = saved;
                     return r;
                 }
-                ms.push_cap(s, MatchState::CAP_UNFINISHED);
+                ms.push_cap(s, CAP_UNFINISHED);
                 auto r = match_rec(ms, s, p + 1);
                 if (!r) ms.cap_level = saved;
                 return r;
@@ -305,7 +305,7 @@ namespace ys
                 if (!r) {
                     // Undo the close.
                     ms.caps[static_cast<std::size_t>(idx)].len =
-                        MatchState::CAP_UNFINISHED;
+                        CAP_UNFINISHED;
                 }
                 return r;
             }
@@ -321,11 +321,13 @@ namespace ys
                 int depth = 1;
                 std::size_t i = s + 1;
                 while (i < ms.subj.size()) {
-                    if (ms.subj[i] == open_ch) ++depth;
-                    else if (ms.subj[i] == close_ch) {
+                    // Check close FIRST so %b'' (open==close) works correctly.
+                    if (ms.subj[i] == close_ch) {
                         --depth;
                         if (depth == 0)
                             return match_rec(ms, i + 1, p + 4);
+                    } else if (ms.subj[i] == open_ch) {
+                        ++depth;
                     }
                     ++i;
                 }
@@ -352,21 +354,22 @@ namespace ys
             // %digit: back-reference
             if (pat[p] == '%' && p + 1 < pat.size() &&
                 pat[p + 1] >= '0' && pat[p + 1] <= '9') {
-                int idx = pat[p + 1] - '1';  // %1 = caps[0]
                 if (pat[p + 1] == '0')
                     throw PatternError("invalid capture index %0");
+                int idx = pat[p + 1] - '1';  // %1 = caps[0]
                 if (idx >= ms.cap_level)
                     throw PatternError(std::string("invalid capture index %") +
                                        pat[p + 1]);
                 Capture& cap = ms.caps[idx];
-                if (cap.len == MatchState::CAP_UNFINISHED)
-                    throw PatternError("invalid capture index");
-                std::size_t cap_len = cap.len;
-                // Check the captured text appears at s
-                if (cap_len == 0) {
-                    // Position capture: no text to match, just advance past
+                if (cap.len == CAP_UNFINISHED)
+                    throw PatternError(std::string("invalid capture index %") +
+                                       pat[p + 1]);
+                // Position captures and empty captures: no text to match.
+                if (cap.len == CAP_POSITION || cap.len == 0) {
                     return match_rec(ms, s, p + 2);
                 }
+                std::size_t cap_len = cap.len;
+                // Check the captured text appears at s
                 if (s + cap_len > ms.subj.size())
                     return std::nullopt;
                 if (std::memcmp(&ms.subj[s], &ms.subj[cap.start], cap_len) != 0)
@@ -446,7 +449,7 @@ namespace ys
 
             // Verify all captures are closed
             for (int i = 0; i < ms.cap_level; ++i)
-                if (ms.caps[i].len == MatchState::CAP_UNFINISHED)
+                if (ms.caps[i].len == CAP_UNFINISHED)
                     throw PatternError("unfinished capture");
 
             ms.caps.resize(ms.cap_level);
@@ -486,7 +489,7 @@ namespace ys
                     auto end = match_rec(ms, i, 0);
                     if (end) {
                         for (int ci = 0; ci < ms.cap_level; ++ci)
-                            if (ms.caps[ci].len == MatchState::CAP_UNFINISHED)
+                            if (ms.caps[ci].len == CAP_UNFINISHED)
                                 throw PatternError("unfinished capture");
                         // Truncate caps to cap_level
                         ms.caps.resize(ms.cap_level);

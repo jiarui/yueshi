@@ -158,6 +158,10 @@ yueshi_eval_test(yueshi_lua_verybig_corpus verybig_corpus.cpp
 yueshi_eval_test(yueshi_lua_utf8_corpus utf8_corpus.cpp
     CORPUS_DIR "${CMAKE_SOURCE_DIR}/test/corpus")
 
+# pm corpus: pm.lua with _soft=true (full pattern engine).
+yueshi_eval_test(yueshi_lua_pm_corpus pm_corpus.cpp
+    CORPUS_DIR "${CMAKE_SOURCE_DIR}/test/corpus")
+
 # Pattern engine unit tests: pure-C++ tests over std::string_view.
 add_executable(yueshi_lua_pattern_test
     pattern_test.cpp

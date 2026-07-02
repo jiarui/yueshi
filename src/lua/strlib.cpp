@@ -90,10 +90,18 @@ namespace ys
             const std::string& s = str_arg(ev, args, 0, "sub");
             long long i = int_arg(args, 1, 1);
             long long j = int_arg(args, 2, static_cast<long long>(s.size()));
-            std::size_t a = rel_pos(i, s.size());
-            std::size_t b = rel_pos(j, s.size());
-            if (b < a) return {mk_str(ev, "")};
-            return {mk_str(ev, s.substr(a, b - a + 1))};
+            // Lua's string.sub: normalize negative indices, then check i > j
+            // BEFORE converting to 0-based. i=1,j=0 → i>j → "" (not the first
+            // char, which the naive 0-based conversion would yield).
+            long long n = static_cast<long long>(s.size());
+            if (i < 0) i += n + 1;
+            if (j < 0) j += n + 1;
+            if (i < 1) i = 1;
+            if (j > n) j = n;
+            if (i > j) return {mk_str(ev, "")};
+            return {mk_str(ev, s.substr(
+                static_cast<std::size_t>(i - 1),
+                static_cast<std::size_t>(j - i + 1)))};
         }
 
         ValueVec b_upper(Evaluator& ev, ValueVec args)
@@ -527,7 +535,7 @@ namespace ys
         {
             ValueVec out;
             for (const auto& c : caps) {
-                if (c.len == 0) {
+                if (is_position_cap(c)) {
                     // Position capture: 1-based byte offset
                     out.push_back(LuaValue::integer(
                         static_cast<long long>(c.start + 1)));
@@ -565,7 +573,9 @@ namespace ys
             }
         }
 
-        // string.match(s, pat [, init]) — anchored at init, returns captures
+        // string.match(s, pat [, init]) — returns captures or whole match.
+        // Semantically like find but returns captures instead of positions.
+        // Non-anchored patterns search forward from init (like find).
         ValueVec b_match(Evaluator& ev, ValueVec args)
         {
             const std::string& s = str_arg(ev, args, 0, "match");
@@ -575,17 +585,14 @@ namespace ys
             std::size_t init = rel_pos(init_ll, s.size());
 
             try {
-                // Strip anchor: match() tries only at init (like ^-anchored find).
-                std::string_view pat{p};
-                bool anchored = !pat.empty() && pat[0] == '^';
-                std::string_view rp = anchored ? pat.substr(1) : pat;
-                // Try at init only.
-                auto mr = pattern_at(s, init, p);
-                if (!mr) return {LuaValue::nil()};
-                auto caps = caps_to_lua(ev, s, mr->captures);
+                // Use pattern_find (handles anchoring + forward search).
+                auto fr = pattern_find(s, init, p, false);
+                if (!fr) return {LuaValue::nil()};
+                auto caps = caps_to_lua(ev, s, fr->captures);
                 if (caps.empty()) {
-                    // No captures: return the whole match
-                    return {mk_str(ev, std::string(s.substr(init, mr->end - init)))};
+                    // No captures: return the whole match.
+                    return {mk_str(ev, std::string(s.substr(
+                        fr->start, fr->end - fr->start)))};
                 }
                 return caps;
             } catch (const PatternError& e) {
@@ -662,17 +669,31 @@ namespace ys
             return {LuaValue::nil()};
         }
 
-        // string.gmatch(s, pat) -> iterator, state, nil
+        // string.gmatch(s, pat [, init]) -> iterator, state, nil
         ValueVec b_gmatch(Evaluator& ev, ValueVec args)
         {
             const std::string& s = str_arg(ev, args, 0, "gmatch");
             const std::string& p = str_arg(ev, args, 1, "gmatch");
+            // Init: relative position, NOT clamped to [1, len+1]. gmatch's
+            // loop condition (pos <= len) handles out-of-range naturally.
+            long long init_ll = args.size() >= 3 && args[2].is_number()
+                ? (args[2].is_int() ? args[2].as_int()
+                                    : static_cast<long long>(args[2].as_flt()))
+                : 1;
+            // Convert to 0-based, handling negative (from end).
+            std::size_t init;
+            long long n = static_cast<long long>(s.size());
+            if (init_ll < 0) init_ll = n + 1 + init_ll;
+            if (init_ll < 1) init = 0;
+            else init = static_cast<std::size_t>(init_ll - 1);
 
             Table* state = ev.heap().make_table();
             LuaKey sk; sk.k = LuaKey::K::Str; sk.s = "s";
             state->hash[sk] = mk_str(ev, s);
             LuaKey pk; pk.k = LuaKey::K::Str; pk.s = "p";
             state->hash[pk] = mk_str(ev, p);
+            LuaKey ik; ik.k = LuaKey::K::Str; ik.s = "i";
+            state->hash[ik] = LuaValue::integer(static_cast<long long>(init));
 
             Builtin* iter = ev.heap().make_builtin("gmatch_iter", b_gmatch_iter);
             return {LuaValue::builtin(iter), LuaValue::table(state),
@@ -692,17 +713,33 @@ namespace ys
                     char d = repl[i + 1];
                     if (d == '%') { out += '%'; ++i; continue; }
                     if (d >= '0' && d <= '9') {
-                        int idx = d - '0';
+                        int idx = d - '0';   // 0=whole match, 1-9=captures
                         if (idx == 0) {
+                            // %0: whole match
                             out += std::string(subj.substr(mstart, mend - mstart));
-                        } else if (idx <= num_captures) {
-                            const Capture& c = caps[idx - 1];
-                            if (c.len == 0)
-                                throw LuaError("invalid capture index in replacement string", 0);
-                            out += std::string(subj.substr(c.start, c.len));
                         } else {
-                            throw LuaError(std::string("invalid capture index %") +
-                                           d + " in replacement string", 0);
+                            // %1-%9: capture[idx-1] (0-based). If idx-1 >= num_captures,
+                            // fall back to the whole match when idx==1 (Lua's
+                            // get_onecapture: i>=level and i==0 → whole match).
+                            int ci = idx - 1;  // 0-based capture index
+                            if (ci >= num_captures) {
+                                if (ci == 0) {
+                                    // %1 with no captures → whole match
+                                    out += std::string(subj.substr(mstart, mend - mstart));
+                                } else {
+                                    throw LuaError(std::string(
+                                        "invalid capture index %") +
+                                        d + " in replacement string", 0);
+                                }
+                            } else {
+                                const Capture& c = caps[ci];
+                                if (is_position_cap(c)) {
+                                    // Position capture: emit 1-based position.
+                                    out += std::to_string(c.start + 1);
+                                } else {
+                                    out += std::string(subj.substr(c.start, c.len));
+                                }
+                            }
                         }
                         ++i; continue;
                     }
@@ -727,9 +764,10 @@ namespace ys
             std::string result;
             std::size_t i = 0;
             std::size_t prev_end = SIZE_MAX;
-            long long count = 0;
+            long long count = 0;       // substitutions (return value)
+            long long nmatch = 0;      // total matches (for max_s limit)
 
-            while (i <= s.size() && (max_s < 0 || count < max_s)) {
+            while (i <= s.size() && (max_s < 0 || nmatch < max_s)) {
                 // Anchored pattern: only match at position 0.
                 if (anchored && i > 0) {
                     if (i < s.size()) result += s[i];
@@ -754,9 +792,10 @@ namespace ys
                 std::size_t mend = mr->end;
                 int ncaps = static_cast<int>(mr->captures.size());
                 prev_end = mend;
-                ++count;
+                ++nmatch;
 
                 std::string replacement;
+                bool substituted = true;  // default for string repl
                 if (repl.is_str()) {
                     replacement = apply_str_repl(repl.as_str()->data, s,
                                                  mstart, mend, mr->captures, ncaps);
@@ -772,8 +811,11 @@ namespace ys
                     }
                     ValueVec rv = ev.call_value(repl, std::move(call_args), 0);
                     if (rv.empty() || rv[0].is_nil() ||
-                        (rv[0].is_bool() && !rv[0].as_bool()))
+                        (rv[0].is_bool() && !rv[0].as_bool())) {
+                        // nil/false: no substitution, keep original match.
+                        substituted = false;
                         replacement = std::string(s.substr(mstart, mend - mstart));
+                    }
                     else if (rv[0].is_str())
                         replacement = rv[0].as_str()->data;
                     else
@@ -786,7 +828,7 @@ namespace ys
                         key = mk_str(ev, std::string(s.substr(mstart, mend - mstart)));
                     else {
                         const Capture& c = mr->captures[0];
-                        if (c.len == 0)
+                        if (is_position_cap(c))
                             key = LuaValue::integer(static_cast<long long>(c.start + 1));
                         else
                             key = mk_str(ev, std::string(s.substr(c.start, c.len)));
@@ -815,9 +857,10 @@ namespace ys
                             }
                         }
                     }
-                    if (tval.is_nil() || (tval.is_bool() && !tval.as_bool()))
+                    if (tval.is_nil() || (tval.is_bool() && !tval.as_bool())) {
+                        substituted = false;
                         replacement = std::string(s.substr(mstart, mend - mstart));
-                    else if (tval.is_str())
+                    } else if (tval.is_str())
                         replacement = tval.as_str()->data;
                     else
                         throw LuaError("invalid replacement value (a " +
@@ -827,6 +870,7 @@ namespace ys
                     throw LuaError("bad argument #3 to 'gsub' (string/function/table expected)", 0);
                 }
 
+                if (substituted) ++count;
                 result += replacement;
                 if (mend > i)
                     i = mend;
@@ -836,6 +880,11 @@ namespace ys
                 }
             }
             if (i < s.size()) result += s.substr(i);
+            // Optimization: if no substitutions were made, return the original
+            // string (Lua does this so %p identity is preserved for no-op
+            // gsubs). Return the ORIGINAL LuaValue, not a new allocation.
+            if (count == 0)
+                return {args[0], LuaValue::integer(0)};
             return {mk_str(ev, std::move(result)),
                     LuaValue::integer(count)};
         }
